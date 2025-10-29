@@ -1,10 +1,16 @@
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
+
 export default function Home() {
   return (
-    <main className="p-10 bg-gray-50">
-      <h1 className="text-2xl font-semibold text-gray-900">Hello Tailwind 👋</h1>
-      <p className="mt-2 text-sm text-gray-600">
-        If this text is styled and centered nicely, Tailwind is working.
-      </p>
+    <main className="p-10 space-y-6">
+      <h1 className="text-2xl font-semibold">shadcn/ui demo</h1>
+      <div className="flex items-center gap-3">
+        <Input placeholder="Type here…" className="w-64" />
+        <Button>Primary Button</Button>
+        <Badge>Badge</Badge>
+      </div>
     </main>
   );
 }

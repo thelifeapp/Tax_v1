@@ -1,26 +1,60 @@
 @import "tailwindcss";
 
+/* ──────────────────────────────────────────────────────────────
+   Minimal, stable foundation with full theming capability.
+   - Brand palette + radius via CSS variables
+   - Light + Dark palettes
+   - Works with Tailwind v4 + shadcn/ui
+   - No experimental @theme / @custom-variant
+   ────────────────────────────────────────────────────────────── */
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  /* Brand & UI tokens — tweak these for your look */
+  --brand:        oklch(0.62 0.17 262);  /* a rich indigo */
+  --brand-ink:    oklch(0.98 0 0);       /* on-brand text on brand bg */
+  --bg:           oklch(0.99 0 0);       /* page background */
+  --ink:          oklch(0.17 0.01 255);  /* primary text */
+  --surface:      oklch(0.985 0 0);      /* cards/sections */
+  --muted:        oklch(0.93 0 0);       /* subtle backgrounds */
+  --muted-ink:    oklch(0.47 0.02 255);  /* secondary text */
+  --border:       oklch(0.90 0 0);
+  --ring:         oklch(0.70 0.02 255);
+  --radius:       12px;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+:root.dark {
+  /* Dark mode overrides (optional) */
+  --bg:        oklch(0.17 0.01 255);
+  --ink:       oklch(0.98 0 0);
+  --surface:   oklch(0.22 0.02 255);
+  --muted:     oklch(0.26 0.02 255);
+  --muted-ink: oklch(0.80 0 0);
+  --border:    oklch(0.35 0 0);
+  --ring:      oklch(0.70 0.02 255);
+  --brand:     oklch(0.68 0.18 262);
+  --brand-ink: oklch(0.12 0 0);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+html, body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--ink);
+}
+
+@layer base {
+  *, ::before, ::after {
+    border-color: var(--border);
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+/* Handy utility shortcuts (optional) */
+:root {
+  --shadow-soft: 0 8px 30px rgba(0, 0, 0, 0.06);
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-soft);
 }
