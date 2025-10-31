@@ -1,16 +1,25 @@
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
+// app/page.tsx
+"use client";
+
+import { useEffect, useState } from "react";
+import { supabase } from "@/lib/supabase";
 
 export default function Home() {
+  const [ok, setOk] = useState<"checking" | "yes" | "no">("checking");
+
+  useEffect(() => {
+    // Very simple check that the client is alive and can call the SDK
+    supabase.auth.getSession()
+      .then(() => setOk("yes"))
+      .catch(() => setOk("no"));
+  }, []);
+
   return (
-    <main className="p-10 space-y-6">
-      <h1 className="text-2xl font-semibold">shadcn/ui demo</h1>
-      <div className="flex items-center gap-3">
-        <Input placeholder="Type here…" className="w-64" />
-        <Button>Primary Button</Button>
-        <Badge>Badge</Badge>
-      </div>
+    <main className="p-10 space-y-4">
+      <h1 className="text-2xl font-semibold">Supabase connection test</h1>
+      <p className="text-sm text-muted-foreground">
+        Supabase client loaded: {ok === "checking" ? "…checking" : ok === "yes" ? "✅ yes" : "❌ no"}
+      </p>
     </main>
   );
 }
