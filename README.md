@@ -48,3 +48,62 @@ It provides attorneys with a centralized dashboard to manage client filings, red
 ```bash
 git clone https://github.com/thelifeapp/Tax_v1.git
 cd Tax_v1
+
+## 2️⃣ Install Dependencies
+```bash
+npm install
+
+
+##Installs all required packages (Next.js, Tailwind, shadcn/ui, Supabase SDK, etc.).
+
+##3️⃣ Create Environment File
+
+##Create a .env.local file at the root of your project with your Supabase credentials:
+
+##NEXT_PUBLIC_SUPABASE_URL=https://<your-project-ref>.supabase.co
+##NEXT_PUBLIC_SUPABASE_ANON_KEY=<your-anon-key>
+##BASE_APP_URL=http://localhost:3000
+
+
+##⚠️ Important: Do not commit .env.local — it contains your private API keys.
+
+##4️⃣ Run the Development Server
+```bash
+npm run dev
+
+
+##Then visit http://localhost:3000
+
+##You should see:
+
+##Supabase client loaded: ✅ yes
+
+##🧭 Version History
+##Version Tag	Description	Commit Link	Date	Status
+##v0.1-base-ui	Base UI complete – Tailwind CSS v4 installed and configured	91e705b
+##	Oct 28 2025	✅ Done
+##v0.15-shadcn-verification	Verified shadcn/ui components render correctly (Button, Badge, Input)	6f424ed
+##	Oct 29 2025	✅ Done
+##v0.2-supabase-connection	Supabase client installed, .env.local configured, and connection verified	1e13036
+##	Oct 31 2025	✅ Done
+##v0.3-auth-login-dashboard	Implement magic-link login and protected /dashboard route	(upcoming)	Nov 1 2025	🟡 In ##progress
+##v0.35-user-bootstrap	Auto-create firm + user record on first login	(upcoming)	Nov 2 2025	🔜 Planned
+##v0.4-clients-filings	Nested Clients → Filings dashboard view	(upcoming)	Nov 4 2025	🔜 Planned
+##v0.45-client-input	Add/Edit Client modal with shared field mapping	(upcoming)	Nov 5 2025	🔜 Planned
+##v0.5-export-email	Export-to-email and PDF attach flow	(upcoming)	Nov 6 2025	🔜 Planned
+##v0.6-polish	UI cleanup, hover states, consistent spacing/colors	(upcoming)	Nov 8 2025	🔜 Planned
+##v1.0-MVP-launch	MVP feature-complete and ready for demo users	(upcoming)	Nov 9 2025	🎯 Target
+##🪙 License
+
+##© 2025 The Life App. All rights reserved.
+##Private proprietary MVP codebase – not for public redistribution.
+
+##🌐 Future Demo (Placeholder)
+
+##When your MVP is live, include your hosted link here:
+
+https://tax-thelifeapp-demo.vercel.app
+
+##👩‍💻 Maintainer
+
+##Emily Evanko – Founder & CTO
