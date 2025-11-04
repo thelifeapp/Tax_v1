@@ -9,23 +9,35 @@ export default function AuthCallbackPage() {
   const params = useSearchParams();
 
   useEffect(() => {
-    const code = params.get("code");
-    // The magic link arrives with ?code=...; exchange it for a session.
     const run = async () => {
+      // 1) Complete magic link sign-in
+      const code = params.get("code");
       if (code) {
         const { error } = await supabase.auth.exchangeCodeForSession(code);
         if (error) {
-          console.error(error);
-          router.replace("/login");
-          return;
+          console.error("exchangeCodeForSession:", error);
+          return router.replace("/login");
         }
-        router.replace("/dashboard");
-      } else {
-        // If user is already signed in, go straight to dashboard.
-        const { data } = await supabase.auth.getSession();
-        if (data.session) router.replace("/dashboard");
-        else router.replace("/login");
       }
+
+      // 2) Do they already belong to a firm?
+      const { data: mships, error } = await supabase
+        .from("firm_members")
+        .select("firm_id")
+        .limit(1);
+
+      if (error) {
+        console.error("firm_members check:", error);
+        return router.replace("/dashboard"); // fail-open
+      }
+
+      if (mships && mships.length > 0) {
+        localStorage.setItem("firmId", String(mships[0].firm_id));
+        return router.replace("/dashboard");
+      }
+
+      // 3) No firm yet → onboarding to capture name & firm
+      router.replace("/onboarding");
     };
     run();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -33,7 +45,7 @@ export default function AuthCallbackPage() {
 
   return (
     <main className="min-h-screen grid place-items-center p-8">
-      <p className="text-muted-foreground">Signing you in…</p>
+      <p className="text-muted-foreground">Finishing sign-in…</p>
     </main>
   );
 }
