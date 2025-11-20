@@ -194,6 +194,7 @@ export default function DashboardPage() {
                     <NewFilingDialog
                       clientId={c.id}
                       clientName={`${c.last_name}, ${c.first_name}`}
+                      clientEmail={c.email}
                       onCreated={() => {
                         triggerRefresh();
                       }}

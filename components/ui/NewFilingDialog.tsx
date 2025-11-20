@@ -1,115 +1,246 @@
+// components/ui/NewFilingDialog.tsx
+
 "use client";
 
-import { useMemo, useState } from "react";
-import { supabase } from "@/lib/supabase";
+import { useState } from "react";
+import { useRouter } from "next/navigation";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 
-type Props = {
+interface NewFilingDialogProps {
   clientId: string;
-  clientName: string;
-  onCreated?: (created: number, skipped: string[]) => void;
-};
+  clientEmail?: string | null;
+}
 
-const ALL_FORMS = ["1041","706","709"] as const;
-type FormCode = typeof ALL_FORMS[number];
+type IntakeMode = "client" | "lawyer";
 
-export default function NewFilingDialog({ clientId, clientName, onCreated }: Props) {
+const FORM_CODES = ["1041", "706", "709"] as const;
+type FormCode = (typeof FORM_CODES)[number];
+
+export function NewFilingDialog({ clientId, clientEmail }: NewFilingDialogProps) {
+  const router = useRouter();
+
   const [open, setOpen] = useState(false);
-  const [forms, setForms] = useState<FormCode[]>([]);
-  const [year, setYear] = useState<number | "">("");
-  const [status, setStatus] = useState("in_progress");
-  const [submitting, setSubmitting] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const currentYear = useMemo(()=> new Date().getFullYear(), []);
-  const validYear = typeof year === "number" && year >= 2000 && year <= currentYear + 1;
+  // original behavior: multiple forms via checkboxes
+  const [selectedForms, setSelectedForms] = useState<FormCode[]>(["1041"]);
+  const [taxYear, setTaxYear] = useState<number>(new Date().getFullYear());
+  const [status, setStatus] = useState<string>("draft");
+  const [intakeMode, setIntakeMode] = useState<IntakeMode>("lawyer"); // default CPA/Lawyer
 
-  const toggleForm = (code: FormCode) => {
-    setForms(prev => prev.includes(code) ? prev.filter(f=>f!==code) : [...prev, code]);
-  };
+  function toggleForm(code: FormCode) {
+    setSelectedForms((prev) =>
+      prev.includes(code) ? prev.filter((c) => c !== code) : [...prev, code]
+    );
+  }
 
-  const submit = async () => {
-    if (!forms.length) return alert("Select at least one form.");
-    if (!validYear) return alert(`Enter a valid tax year (2000–${currentYear+1}).`);
+  async function handleCreate() {
+    try {
+      setIsSubmitting(true);
 
-    setSubmitting(true);
-    let created = 0;
-    const skipped: string[] = [];
-
-    for (const code of forms) {
-      const { error } = await supabase.from("filings").insert({
-        client_id: clientId,
-        filing_type: code,
-        tax_year: year,
-        status
-      });
-      if (error) {
-        // duplicate or other constraint -> collect as skipped
-        skipped.push(`${code}/${year}`);
-      } else {
-        created += 1;
+      if (selectedForms.length === 0) {
+        alert("Please select at least one form.");
+        setIsSubmitting(false);
+        return;
       }
+
+      // 1. Call your existing /api/filings endpoint with the
+      //    same shape it had before we added intakeMode.
+      const res = await fetch("/api/filings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          clientId,
+          taxYear,
+          status,
+          forms: selectedForms, // <= original API contract
+          // NOTE: we intentionally DO NOT send intakeMode here
+        }),
+      });
+
+      if (!res.ok) {
+        const text = await res.text();
+        console.error("Create filing error:", text);
+        throw new Error("Failed to create filing");
+      }
+
+      const data = await res.json();
+
+      // Some implementations return one filing, some an array – handle both.
+      const createdFilings = Array.isArray(data) ? data : [data];
+
+      // Find the 1041 filing (if any)
+      const filing1041 =
+        createdFilings.find(
+          (f: any) =>
+            f.filing_type === "1041" ||
+            f.filingType === "1041" ||
+            f.form_code === "1041"
+        ) ?? createdFilings[0];
+
+      const has1041 = createdFilings.some(
+        (f: any) =>
+          f.filing_type === "1041" ||
+          f.filingType === "1041" ||
+          f.form_code === "1041"
+      );
+
+      // 2. Lawyer mode + 1041 → go straight into the intake flow
+      if (intakeMode === "lawyer" && has1041 && filing1041?.id) {
+        setOpen(false);
+        router.push(`/filings/${filing1041.id}/intake`);
+        return;
+      }
+
+      // 3. Client mode + 1041 → create invite + copy link
+      if (intakeMode === "client" && has1041 && filing1041?.id) {
+        try {
+          const inviteRes = await fetch("/api/intake/invite", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              filingId: filing1041.id,
+              email: clientEmail ?? null,
+            }),
+          });
+
+          if (!inviteRes.ok) {
+            console.error("Invite error:", await inviteRes.text());
+            throw new Error("Failed to create client invite");
+          }
+
+          const { link } = await inviteRes.json();
+
+          if (link) {
+            await navigator.clipboard.writeText(link);
+            alert("Client intake link copied to your clipboard.");
+          } else {
+            alert("Client invite created, but no link was returned.");
+          }
+        } catch (e) {
+          console.error(e);
+          alert(
+            "Filing was created, but there was an issue creating the client invite."
+          );
+        }
+      }
+
+      // 4. Close dialog & refresh dashboard list
+      setOpen(false);
+      router.refresh();
+    } catch (error) {
+      console.error(error);
+      alert("Error creating filing. Please try again.");
+    } finally {
+      setIsSubmitting(false);
     }
-
-    setSubmitting(false);
-    setOpen(false);
-    onCreated?.(created, skipped);
-    setForms([]); setYear(""); setStatus("in_progress");
-
-    if (created) alert(`${created} filing(s) created for ${clientName}.`);
-    if (skipped.length) alert(`Skipped (already exists): ${skipped.join(", ")}`);
-  };
+  }
 
   return (
     <>
-      <button className="rounded-xl border px-2 py-1 text-xs hover:bg-muted"
-        onClick={()=>setOpen(true)}>
+      <Button size="sm" onClick={() => setOpen(true)}>
         + Filing
-      </button>
+      </Button>
 
-      {open && (
-        <div className="fixed inset-0 z-50 grid place-items-center bg-black/30">
-          <div className="w-[460px] rounded-2xl bg-white p-5 shadow-xl">
-            <div className="mb-3 text-lg font-semibold">New Filing · {clientName}</div>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="max-w-md bg-[#f2f2f2] border border-neutral-300 text-foreground">
+          <DialogHeader>
+            <DialogTitle>New Filing</DialogTitle>
+          </DialogHeader>
 
-            <div className="space-y-4">
-              <div>
-                <div className="mb-1 text-sm font-medium">Form(s)</div>
-                <div className="flex gap-3">
-                  {ALL_FORMS.map(code => (
-                    <label key={code} className="flex items-center gap-2 text-sm">
-                      <input type="checkbox" checked={forms.includes(code)} onChange={()=>toggleForm(code)} />
-                      {code}
-                    </label>
-                  ))}
-                </div>
-              </div>
-
-              <div>
-                <div className="mb-1 text-sm font-medium">Tax year</div>
-                <input className="w-40 rounded border p-2" type="number" placeholder={`${currentYear}`}
-                  value={year} onChange={e=>setYear(e.target.value ? Number(e.target.value) : "")} />
-                {!validYear && year !== "" && (
-                  <div className="mt-1 text-xs text-red-600">Enter a year 2000–{currentYear+1}.</div>
-                )}
-              </div>
-
-              <div>
-                <div className="mb-1 text-sm font-medium">Initial status</div>
-                <select className="rounded border p-2" value={status} onChange={e=>setStatus(e.target.value)}>
-                  <option value="in_progress">in_progress</option>
-                  <option value="ready_for_review">ready_for_review</option>
-                  <option value="filed">filed</option>
-                </select>
+          <div className="space-y-4 mt-2">
+            {/* Form(s) checkboxes */}
+            <div className="space-y-1">
+              <label className="text-sm font-medium">Form(s)</label>
+              <div className="flex gap-4 text-sm mt-1">
+                {FORM_CODES.map((code) => (
+                  <label key={code} className="flex items-center gap-1">
+                    <input
+                      type="checkbox"
+                      checked={selectedForms.includes(code)}
+                      onChange={() => toggleForm(code)}
+                    />
+                    <span>{code}</span>
+                  </label>
+                ))}
               </div>
             </div>
 
-            <div className="mt-4 flex justify-end gap-2">
-              <button className="rounded-xl border px-3 py-2" onClick={()=>setOpen(false)} disabled={submitting}>Cancel</button>
-              <button className="rounded-xl bg-black px-3 py-2 text-white disabled:opacity-50"
-                onClick={submit} disabled={submitting}>{submitting ? "Saving…" : "Create"}</button>
+            {/* Tax year */}
+            <div className="space-y-1">
+              <label className="text-sm font-medium">Tax year</label>
+              <Input
+                type="number"
+                value={taxYear}
+                onChange={(e) => setTaxYear(Number(e.target.value))}
+              />
+            </div>
+
+            {/* Status */}
+            <div className="space-y-1">
+              <label className="text-sm font-medium">Initial status</label>
+              <select
+                className="w-full border rounded-md px-2 py-1 text-sm bg-white"
+                value={status}
+                onChange={(e) => setStatus(e.target.value)}
+              >
+                <option value="draft">Draft</option>
+                <option value="in_progress">In progress</option>
+              </select>
+            </div>
+
+            {/* Intake mode */}
+            <div className="space-y-1">
+              <label className="text-sm font-medium">
+                Who will fill out the questionnaire?
+              </label>
+              <div className="mt-1 flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIntakeMode("lawyer")}
+                  className={`flex-1 rounded-full border px-3 py-2 text-sm ${
+                    intakeMode === "lawyer" ? "bg-black text-white" : "bg-white"
+                  }`}
+                >
+                  CPA or Lawyer
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIntakeMode("client")}
+                  className={`flex-1 rounded-full border px-3 py-2 text-sm ${
+                    intakeMode === "client" ? "bg-black text-white" : "bg-white"
+                  }`}
+                >
+                  Client
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+
+          <div className="mt-6 flex justify-end gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setOpen(false)}
+              disabled={isSubmitting}
+            >
+              Cancel
+            </Button>
+            <Button type="button" onClick={handleCreate} disabled={isSubmitting}>
+              {isSubmitting ? "Creating..." : "Create filing"}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }
+
+export default NewFilingDialog;
