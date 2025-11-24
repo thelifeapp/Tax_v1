@@ -13,7 +13,7 @@ export default function AuthCallbackPage() {
     const run = async () => {
       const url = new URL(window.location.href);
 
-      // 1) Check for error returned by Supabase (like otp_expired)
+      // ---- 1) Handle explicit error responses from Supabase (otp_expired, etc.) ----
       const hash = url.hash.startsWith("#") ? url.hash.slice(1) : url.hash;
       const hashParams = new URLSearchParams(hash);
       const error = hashParams.get("error");
@@ -25,26 +25,16 @@ export default function AuthCallbackPage() {
         setMessage(
           decodeURIComponent(
             errorDescription ||
-              "This magic link is invalid or has expired. Please request a new one."
+              "This magic link is invalid or has expired. Please request a new one from the login page."
           )
         );
         return;
       }
 
-      // 2) Success path: we should have a ?code=... query param
-      const code = url.searchParams.get("code");
-      if (!code) {
-        setStatus("error");
-        setMessage(
-          "No auth code found in the link. Please request a new magic link from the login page."
-        );
-        return;
-      }
-
+      // ---- 2) Normal success path: let Supabase parse the URL (hash or ?code) ----
       try {
-        // Correct usage: exchange JUST the code, not the whole URL
         const { error: exchangeError } =
-          await supabase.auth.exchangeCodeForSession(code);
+          await supabase.auth.exchangeCodeForSession(window.location.href);
 
         if (exchangeError) {
           console.error("exchangeCodeForSession error", exchangeError);
