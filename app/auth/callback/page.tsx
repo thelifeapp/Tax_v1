@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
+import type { EmailOtpType } from "@supabase/supabase-js";
 
 export default function AuthCallbackPage() {
   const router = useRouter();
@@ -13,7 +14,7 @@ export default function AuthCallbackPage() {
     const run = async () => {
       const url = new URL(window.location.href);
 
-      // ---- 1) Handle explicit error responses from Supabase (otp_expired, etc.) ----
+      // ---- 1) Handle explicit error fragments from Supabase, if any ----
       const hash = url.hash.startsWith("#") ? url.hash.slice(1) : url.hash;
       const hashParams = new URLSearchParams(hash);
       const error = hashParams.get("error");
@@ -31,22 +32,35 @@ export default function AuthCallbackPage() {
         return;
       }
 
-      // ---- 2) Normal success path: let Supabase parse the URL (hash or ?code) ----
-      try {
-        const { error: exchangeError } =
-          await supabase.auth.exchangeCodeForSession(window.location.href);
+      // ---- 2) Normal success path: read token_hash & type from query ----
+      const token_hash = url.searchParams.get("token_hash");
+      const type = (url.searchParams.get("type") as EmailOtpType | null) ?? "email";
 
-        if (exchangeError) {
-          console.error("exchangeCodeForSession error", exchangeError);
+      if (!token_hash) {
+        setStatus("error");
+        setMessage(
+          "No auth token found in the link. Please request a new magic link from the login page."
+        );
+        return;
+      }
+
+      try {
+        const { error: verifyError } = await supabase.auth.verifyOtp({
+          token_hash,
+          type,
+        });
+
+        if (verifyError) {
+          console.error("verifyOtp error", verifyError);
           setStatus("error");
           setMessage(
-            exchangeError.message ||
+            verifyError.message ||
               "We couldn’t sign you in. Please request a new magic link."
           );
           return;
         }
 
-        // Session is now stored; send them to dashboard
+        // Session is now stored in Supabase; go to dashboard
         router.replace("/dashboard");
       } catch (err) {
         console.error(err);
