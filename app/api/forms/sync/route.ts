@@ -4,7 +4,7 @@ import { Pool } from "pg";
 import * as XLSX from "xlsx";
 
 // -----------------------------------------------------------------------------
-// ENV + basic validation
+// ENV + validation
 // -----------------------------------------------------------------------------
 
 const FORMS_SYNC_TOKEN = process.env.FORMS_SYNC_TOKEN;
@@ -24,9 +24,7 @@ if (!SERVICE_JSON) {
 // Single global pool pointed at Supabase Postgres
 const pool = new Pool({
   connectionString: DATABASE_URL,
-  ssl: {
-    rejectUnauthorized: false,
-  },
+  ssl: { rejectUnauthorized: false },
 });
 
 type FormSourceRow = {
@@ -42,13 +40,9 @@ type FormSourceRow = {
 
 function getDriveClient() {
   const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
-  if (!raw) {
-    throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON is missing (check .env.local)");
-  }
+  if (!raw) throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON is missing");
 
   const serviceAccount = JSON.parse(raw);
-
-  // 🔑 Normalize the private key newlines
   const privateKey = (serviceAccount.private_key as string).replace(/\\n/g, "\n");
 
   const auth = new google.auth.JWT({
@@ -68,12 +62,13 @@ async function downloadSheetAsBuffer(
     { fileId, alt: "media" },
     { responseType: "arraybuffer" }
   );
-
-  const data = res.data as unknown as ArrayBuffer;
-  return Buffer.from(data);
+  return Buffer.from(res.data as ArrayBuffer);
 }
 
-// Replace form_fields for a template_id with new rows
+// -----------------------------------------------------------------------------
+// Core: REBUILD form_fields exactly from Excel columns
+// -----------------------------------------------------------------------------
+
 async function replaceFormFieldsForTemplate(
   templateId: string,
   code: string,
@@ -81,47 +76,62 @@ async function replaceFormFieldsForTemplate(
 ) {
   const client = await pool.connect();
   try {
-    await client.query("begin");
+    await client.query("BEGIN");
 
-    // Clear existing fields
+    // Always start clean for this template
     await client.query(
-      `delete from public.form_fields where template_id = $1`,
+      `DELETE FROM public.form_fields WHERE template_id = $1`,
       [templateId]
     );
 
+    let insertedCount = 0;
+    const seen = new Set<string>();
+
     for (const raw of rows) {
-      // ----- REQUIRED FIELDS -----
       const fieldKey = (raw.field_key || "").toString().trim();
       const label = (raw.label || "").toString().trim();
+      if (!fieldKey || !label) continue;
+      if (seen.has(fieldKey)) continue;
+      seen.add(fieldKey);
 
-      if (!fieldKey || !label) continue; // skip blank rows
+      const helpText =
+        (raw.help_text || "").toString().trim() || null;
 
-      // ----- BASIC FIELDS -----
-      const helpText = (raw.help_text || "").toString().trim() || null;
-      const section = (raw.section || "").toString().trim() || null;
-      const audience = (raw.audience || "both").toString().trim() || "both";
+      const section =
+        (raw.section || "").toString().trim() || null;
 
-      // ORDER
+      const audienceRaw =
+        (raw.audience || "both").toString().trim().toLowerCase();
+      const audience: string =
+        ["lawyer", "client", "both"].includes(audienceRaw)
+          ? audienceRaw
+          : "both";
+
       const orderNum = Number(raw.order);
-      const order = isNaN(orderNum) ? 0 : orderNum;
+      const order =
+        !isNaN(orderNum) && Number.isInteger(orderNum) ? orderNum : 0;
 
-      // REQUIRED
-      const requiredRaw = (raw.required || "").toString().trim().toLowerCase();
-      const isRequired =
-        requiredRaw === "yes" ||
-        requiredRaw === "true" ||
-        requiredRaw === "y" ||
-        requiredRaw === "1";
+      const reqRaw = (raw.required || "")
+        .toString()
+        .trim()
+        .toLowerCase();
+      const required =
+        reqRaw === "yes" ||
+        reqRaw === "true" ||
+        reqRaw === "1" ||
+        reqRaw === "y";
 
-      // CORE KEY
       const coreKey =
         (raw.core_key || "").toString().trim() || null;
 
-      // ----- INPUT TYPE -----
-      const inputRaw = (raw.input_type || "").toString().trim().toLowerCase();
+      // ---------------------------
+      // input_type + type mapping
+      // ---------------------------
+      const inputTypeRaw = (raw.input_type || "").toString().trim();
+      const inputTypeLc = inputTypeRaw.toLowerCase();
       let type = "text";
 
-      switch (inputRaw) {
+      switch (inputTypeLc) {
         case "number":
         case "currency":
           type = "number";
@@ -136,6 +146,7 @@ async function replaceFormFieldsForTemplate(
           type = "multi_select";
           break;
         case "select":
+        case "dropdown":
           type = "select";
           break;
         case "attachment":
@@ -146,56 +157,71 @@ async function replaceFormFieldsForTemplate(
           type = "text";
       }
 
-      // ----- BUILD VALIDATIONS JSON -----
-      const validations: any = {};
+      const dataType =
+        (raw.data_type || "").toString().trim() || null;
 
-      // LINE ITEM
-      const lineItem = (raw.line_item || "").toString().trim();
-      if (lineItem) validations.line_item = lineItem;
-
-      // DATA TYPE
-      const dataType = (raw.data_type || "").toString().trim();
-      if (dataType) validations.data_type = dataType;
-
-      // PATTERN
-      const pattern = (raw.patern || "").toString().trim();
-      if (pattern) validations.pattern = pattern;
-
-      // OPTIONS
-      const optionsRaw = (raw.options || "").toString().trim();
-      if (optionsRaw) {
-        const opts = optionsRaw
-          .split(";")
-          .map((o: string) => o.trim())
-          .filter(Boolean);
-        if (opts.length > 0) validations.options = opts;
-      }
-
-      // VISIBILITY CONDITION
-      const vis = (raw.visibility_condition || "").toString().trim();
-      if (vis) validations.visibility_condition = vis;
-
-      // IS CALCULATED
-      const calcFlag = (raw.is_calculated || "")
+      const calcFlagRaw = (raw.is_calculated || "")
         .toString()
         .trim()
         .toLowerCase();
       const isCalculated =
-        calcFlag === "yes" ||
-        calcFlag === "y" ||
-        calcFlag === "true" ||
-        calcFlag === "1";
+        calcFlagRaw === "yes" ||
+        calcFlagRaw === "true" ||
+        calcFlagRaw === "1" ||
+        calcFlagRaw === "y";
 
-      if (isCalculated) validations.is_calculated = true;
+      const calculation =
+        (raw.calculation || "").toString().trim() || null;
 
-      // CALCULATION
-      const calcExpr = (raw.calculation || "").toString().trim();
-      if (calcExpr) validations.calculation = calcExpr;
+      const sourceNotes =
+        (raw.source_notes ||
+          raw["Calculation / Source Notes"] ||
+          ""
+        ).toString().trim() || null;
 
-      // --- Insert form_fields row ---
+      const visibilityCondition =
+        (raw.visibility_condition || "").toString().trim() || null;
+
+      // ----- OPTIONS (as JSON array) -----
+      let optionsArray: string[] | null = null;
+      if (raw.options) {
+        const ops = String(raw.options)
+          .split(/[,;]/)
+          .map((o) => o.trim())
+          .filter(Boolean);
+        optionsArray = ops.length > 0 ? ops : null;
+      }
+
+      // -------------------------------------------------------------------
+      // validations JSON (for non-critical metadata; UI will use columns)
+      // -------------------------------------------------------------------
+      const validationsObj: Record<string, any> = {};
+
+      const lineItem = (raw.line_item || "").toString().trim();
+      if (lineItem) validationsObj.line_item = lineItem;
+
+      const pattern = (raw.patern || "").toString().trim();
+      if (pattern) validationsObj.pattern = pattern;
+
+      if (dataType) validationsObj.data_type = dataType;
+      if (visibilityCondition) validationsObj.visibility_condition = visibilityCondition;
+      if (optionsArray) validationsObj.options = optionsArray;
+      if (isCalculated) validationsObj.is_calculated = true;
+      if (calculation) validationsObj.calculation = calculation;
+      if (sourceNotes) validationsObj.source_notes = sourceNotes;
+
+      // ✅ Explicit JSON serialization for jsonb columns
+      const validationsJson =
+        Object.keys(validationsObj).length > 0
+          ? JSON.stringify(validationsObj)
+          : JSON.stringify({});
+
+      const optionsJson = optionsArray ? JSON.stringify(optionsArray) : null;
+
+      // INSERT with all columns
       await client.query(
         `
-        insert into public.form_fields (
+        INSERT INTO public.form_fields (
           template_id,
           field_key,
           label,
@@ -207,9 +233,19 @@ async function replaceFormFieldsForTemplate(
           audience,
           validations,
           core_key,
-          form_code
+          form_code,
+          data_type,
+          input_type,
+          is_calculated,
+          calculation,
+          source_notes,
+          visibility_condition,
+          options
         )
-        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+        VALUES (
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,
+          $10,$11,$12,$13,$14,$15,$16,$17,$18,$19
+        )
       `,
         [
           templateId,
@@ -217,20 +253,30 @@ async function replaceFormFieldsForTemplate(
           label,
           helpText,
           type,
-          isRequired,
+          required,
           section,
           order,
           audience,
-          validations,
+          validationsJson,         // jsonb
           coreKey,
           code,
+          dataType,
+          inputTypeRaw || null,
+          isCalculated,
+          calculation,
+          sourceNotes,
+          visibilityCondition,
+          optionsJson               // jsonb
         ]
       );
+
+      insertedCount++;
     }
 
-    await client.query("commit");
+    await client.query("COMMIT");
+    return insertedCount;
   } catch (err) {
-    await client.query("rollback");
+    await client.query("ROLLBACK");
     console.error("Error replacing form fields:", err);
     throw err;
   } finally {
@@ -243,38 +289,41 @@ async function replaceFormFieldsForTemplate(
 // -----------------------------------------------------------------------------
 
 export async function POST(req: NextRequest) {
-  const authHeader = req.headers.get("x-forms-sync-token");
-  if (!authHeader || authHeader !== FORMS_SYNC_TOKEN) {
-    return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
+  // Token comparison + logging
+  const rawHeader = req.headers.get("x-forms-sync-token") || "";
+  const authHeader = rawHeader.trim();
+  const envToken = (FORMS_SYNC_TOKEN || "").trim();
+
+  console.log("[forms/sync] Header token:", JSON.stringify(authHeader));
+  console.log("[forms/sync] Env token   :", JSON.stringify(envToken));
+
+  if (!authHeader || !envToken || authHeader !== envToken) {
+    return NextResponse.json(
+      { ok: false, error: "Unauthorized (token mismatch)" },
+      { status: 401 }
+    );
   }
 
-  const client = await pool.connect();
   const drive = getDriveClient();
-
-  const synced: Array<{
-    code: string;
-    templateId: string;
-    rowsInserted: number;
-    sheet: string;
-  }> = [];
+  const client = await pool.connect();
+  const synced: any[] = [];
   const errors: any[] = [];
 
   try {
-    // 1) Load form_sources
-    const formSourcesResult = await client.query<FormSourceRow>(
-      `select code, drive_file_id, sheet_name, enabled
-       from form_sources
-       where enabled = true
-       order by code`
+    // 1) Load the form_sources config
+    const formSources = await client.query<FormSourceRow>(
+      `SELECT code, drive_file_id, sheet_name, enabled
+       FROM form_sources
+       WHERE enabled = true
+       ORDER BY code`
     );
 
-    const sources = formSourcesResult.rows;
-
-    for (const source of sources) {
+    // 2) Process each enabled form template
+    for (const source of formSources.rows) {
       const { code, drive_file_id, sheet_name } = source;
 
       try {
-        // 2) Download XLSX from Drive
+        // 3) Download the XLSX file
         const buffer = await downloadSheetAsBuffer(drive, drive_file_id);
         const workbook = XLSX.read(buffer, { type: "buffer" });
 
@@ -290,50 +339,52 @@ export async function POST(req: NextRequest) {
           );
         }
 
+        // 4) Convert sheet rows to JSON
         const rows = XLSX.utils.sheet_to_json<any>(worksheet, {
           defval: null,
         });
 
-        // 3) Ensure form_templates row exists (code + v1)
-        const existingTemplate = await client.query<{
-          id: string;
-        }>(
-          `select id
-           from form_templates
-           where code = $1 and version = 'v1'
-           limit 1`,
+        // 5) Ensure form_templates entry exists
+        const tmplRes = await client.query<{ id: string }>(
+          `SELECT id
+           FROM form_templates
+           WHERE code = $1 AND version = 'v1'
+           LIMIT 1`,
           [code]
         );
 
         let templateId: string;
 
-        if (existingTemplate.rows.length > 0) {
-          templateId = existingTemplate.rows[0].id;
+        if (tmplRes.rows.length > 0) {
+          templateId = tmplRes.rows[0].id;
+
           await client.query(
-            `update form_templates
-             set updated_from_drive_at = now()
-             where id = $1`,
+            `UPDATE form_templates
+             SET updated_from_drive_at = now()
+             WHERE id = $1`,
             [templateId]
           );
         } else {
-          const insertTemplate = await client.query<{
-            id: string;
-          }>(
-            `insert into form_templates (code, name, version, updated_from_drive_at)
-             values ($1, $2, 'v1', now())
-             returning id`,
+          const insert = await client.query<{ id: string }>(
+            `INSERT INTO form_templates (code, name, version, updated_from_drive_at)
+             VALUES ($1, $2, 'v1', now())
+             RETURNING id`,
             [code, `Form ${code}`]
           );
-          templateId = insertTemplate.rows[0].id;
+          templateId = insert.rows[0].id;
         }
 
-        // 4) Rebuild form_fields for this template
-        await replaceFormFieldsForTemplate(templateId, code, rows);
+        // 6) Rebuild form_fields from Sheet
+        const insertedCount = await replaceFormFieldsForTemplate(
+          templateId,
+          code,
+          rows
+        );
 
         synced.push({
           code,
           templateId,
-          rowsInserted: rows.length,
+          rowsInserted: insertedCount,
           sheet: sheetNameToUse,
         });
       } catch (err: any) {
