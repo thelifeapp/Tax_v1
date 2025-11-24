@@ -1,69 +1,64 @@
 "use client";
 
-import { useState } from "react";
-import { supabase } from "@/lib/supabase";
+import { useEffect } from "react";
 import { useRouter } from "next/navigation";
+import { supabase } from "@/lib/supabase";
 
-export default function LoginPage() {
-  const [email, setEmail] = useState("");
-  const [sent, setSent] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+export default function Home() {
   const router = useRouter();
 
-  const onSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError(null);
+  useEffect(() => {
+    const run = async () => {
+      // 1) Do we have a Supabase session at all?
+      const { data, error } = await supabase.auth.getSession();
 
-    const redirectTo =
-      `${process.env.NEXT_PUBLIC_BASE_URL}/auth/callback`;
+      if (error) {
+        console.error("Error getting Supabase session:", error);
+        // If something breaks, fail-open to login
+        router.replace("/login");
+        return;
+      }
 
-    const { error } = await supabase.auth.signInWithOtp({
-      email,
-      options: { emailRedirectTo: redirectTo },
-    });
+      const session = data?.session;
 
-    if (error) {
-      setError(error.message);
-      return;
-    }
-    setSent(true);
-  };
+      if (!session) {
+        // Not logged in → go to login screen
+        router.replace("/login");
+        return;
+      }
 
-  if (sent) {
-    return (
-      <main className="max-w-md mx-auto p-8">
-        <h1 className="text-2xl font-semibold mb-2">Check your email</h1>
-        <p className="text-muted-foreground">
-          We sent a magic link to <span className="font-medium">{email}</span>.
-          Click it to finish signing in.
-        </p>
-      </main>
-    );
-  }
+      // 2) We have a session → check firm membership
+      const { data: mships, error: mshipError } = await supabase
+        .from("firm_members")
+        .select("firm_id")
+        .limit(1);
 
+      if (mshipError) {
+        console.error("firm_members check:", mshipError);
+        // If this check fails, send them to dashboard rather than kicking them out
+        router.replace("/dashboard");
+        return;
+      }
+
+      if (mships && mships.length > 0) {
+        // Save firm ID for the rest of the app
+        if (typeof window !== "undefined") {
+          localStorage.setItem("firmId", String(mships[0].firm_id));
+        }
+        router.replace("/dashboard");
+      } else {
+        // No firm yet → onboarding flow
+        router.replace("/onboarding");
+      }
+    };
+
+    run();
+  }, [router]);
+
+  // While we’re figuring out where to send them:
   return (
-    <main className="min-h-screen grid place-items-center p-6">
-      <form onSubmit={onSubmit} className="w-full max-w-md space-y-4 rounded-2xl border p-6">
-        <h1 className="text-2xl font-semibold">Sign in</h1>
-        <p className="text-sm text-muted-foreground">
-          Enter your email and we’ll send you a magic link.
-        </p>
-        <input
-          type="email"
-          required
-          placeholder="you@lawfirm.com"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          className="w-full rounded-xl border px-3 py-2 outline-none focus:ring-2 focus:ring-ring"
-        />
-        {error && <p className="text-sm text-red-600">{error}</p>}
-        <button
-          type="submit"
-          className="inline-flex items-center justify-center rounded-xl bg-black px-4 py-2 text-white hover:opacity-90"
-        >
-          Send magic link
-        </button>
-      </form>
+    <main className="min-h-screen grid place-items-center p-8">
+      <p className="text-muted-foreground">Checking your session…</p>
     </main>
   );
 }
