@@ -27,7 +27,7 @@ type Filing = {
 const displayUSPhone = (raw: string | null) => {
   if (!raw) return "—";
   const d = raw.replace(/\D/g, "");
-  if (d.length !== 10) return raw; // fall back if not normalized
+  if (d.length !== 10) return raw;
   return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6, 10)}`;
 };
 
@@ -39,7 +39,7 @@ export default function DashboardPage() {
   const [clients, setClients] = useState<Client[]>([]);
   const [filingsByClient, setFilingsByClient] = useState<Record<string, Filing[]>>({});
   const [loading, setLoading] = useState(true);
-  const [open, setOpen] = useState<Record<string, boolean>>({}); // which client rows are expanded
+  const [open, setOpen] = useState<Record<string, boolean>>({});
   const [refreshKey, setRefreshKey] = useState(0);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
@@ -55,7 +55,7 @@ export default function DashboardPage() {
       }
       setEmail(session.user.email ?? null);
 
-      // Get firm for this user
+      // Firm membership
       const { data: mships, error: mErr } = await supabase
         .from("firm_members")
         .select("firm_id")
@@ -66,6 +66,7 @@ export default function DashboardPage() {
         router.replace("/onboarding");
         return;
       }
+
       const fId = (mships[0] as any).firm_id as string;
       setFirmId(fId);
 
@@ -74,9 +75,10 @@ export default function DashboardPage() {
         .select("name")
         .eq("id", fId)
         .single();
+
       if (!fErr) setFirmName(firm?.name ?? null);
 
-      // Load clients for firm
+      // Load clients
       const { data: clientRows, error: cErr } = await supabase
         .from("clients")
         .select("id, first_name, last_name, email, phone")
@@ -90,9 +92,10 @@ export default function DashboardPage() {
       }
       setClients(clientRows ?? []);
 
-      // If there are clients, load filings for all of them
+      // Load filings for clients
       if (clientRows?.length) {
         const ids = clientRows.map((c) => c.id);
+
         const { data: filingRows, error: flErr } = await supabase
           .from("filings")
           .select("id, client_id, filing_type, tax_year, status, updated_at")
@@ -110,6 +113,7 @@ export default function DashboardPage() {
 
       setLoading(false);
     };
+
     run();
   }, [router, refreshKey]);
 
@@ -122,6 +126,7 @@ export default function DashboardPage() {
     const ok = confirm(`Delete client "${clientLabel}" and ALL their filings?`);
     if (!ok) return;
     setDeletingId(clientId);
+
     try {
       const { error } = await supabase.from("clients").delete().eq("id", clientId);
       if (error) {
@@ -139,21 +144,25 @@ export default function DashboardPage() {
     <main className="p-8 space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl md:text-3xl font-semibold">Solace Tax Dashboard</h1>
+
         <div className="flex items-center gap-3">
           {firmId && <NewClientDialog firmId={firmId} onCreated={triggerRefresh} />}
+
           {firmName && (
             <span className="text-xs rounded-full border px-2 py-1 text-muted-foreground">
               Firm: {firmName}
             </span>
           )}
+
           <span className="text-sm text-muted-foreground">{email}</span>
+
           <button onClick={signOut} className="rounded-xl border px-3 py-1.5 hover:bg-muted">
             Sign out
           </button>
         </div>
       </div>
 
-      {/* Clients → Filings (read-only) */}
+      {/* Clients → Filings */}
       <section className="rounded-2xl border">
         <div className="p-4 border-b bg-black rounded-t-2xl">
           <h2 className="font-medium text-white">Clients</h2>
@@ -170,9 +179,11 @@ export default function DashboardPage() {
               const key = c.id;
               const filings = filingsByClient[key] ?? [];
               const isOpen = !!open[key];
+
               return (
                 <li key={key} className="p-4">
                   <div className="flex items-center justify-between gap-3">
+                    {/* Expand / collapse client row */}
                     <button
                       className="flex-1 flex items-center justify-between text-left"
                       onClick={() => setOpen((s) => ({ ...s, [key]: !isOpen }))}
@@ -185,6 +196,7 @@ export default function DashboardPage() {
                           {c.email ?? "—"} {c.phone ? `• ${displayUSPhone(c.phone)}` : ""}
                         </div>
                       </div>
+
                       <span className="text-xs text-muted-foreground">
                         {isOpen ? "Hide filings ▲" : `Show filings (${filings.length}) ▼`}
                       </span>
@@ -195,9 +207,7 @@ export default function DashboardPage() {
                       clientId={c.id}
                       clientName={`${c.last_name}, ${c.first_name}`}
                       clientEmail={c.email}
-                      onCreated={() => {
-                        triggerRefresh();
-                      }}
+                      onCreated={triggerRefresh}
                     />
 
                     {/* Delete Client */}
@@ -212,6 +222,7 @@ export default function DashboardPage() {
                     </button>
                   </div>
 
+                  {/* Filings list */}
                   {isOpen && (
                     <div className="mt-3 rounded-xl border bg-background overflow-hidden">
                       {filings.length === 0 ? (
@@ -226,29 +237,40 @@ export default function DashboardPage() {
                               <th className="p-3 rounded-tr-xl">Updated</th>
                             </tr>
                           </thead>
+
                           <tbody>
                             {filings.map((f, i) => (
                               <tr
                                 key={f.id}
-                                className={`border-b last:border-0 ${
+                                onClick={() => router.push(`/filings/${f.id}/intake`)}
+                                className={`border-b last:border-0 cursor-pointer hover:bg-gray-100 ${
                                   i % 2 === 0 ? "bg-gray-50" : "bg-white"
                                 }`}
                               >
-                                <td className={`p-3 font-medium ${i === filings.length - 1 ? "rounded-bl-xl" : ""}`}>
+                                <td
+                                  className={`p-3 font-medium ${
+                                    i === filings.length - 1 ? "rounded-bl-xl" : ""
+                                  }`}
+                                >
                                   {f.filing_type}
                                 </td>
+
                                 <td className="p-3">{f.tax_year}</td>
+
                                 <td className="p-3">
                                   <span className="rounded-full border px-2 py-0.5 text-xs bg-gray-100">
                                     {f.status}
                                   </span>
                                 </td>
+
                                 <td
                                   className={`p-3 text-xs text-muted-foreground ${
                                     i === filings.length - 1 ? "rounded-br-xl" : ""
                                   }`}
                                 >
-                                  {f.updated_at ? new Date(f.updated_at).toLocaleString() : "—"}
+                                  {f.updated_at
+                                    ? new Date(f.updated_at).toLocaleString()
+                                    : "—"}
                                 </td>
                               </tr>
                             ))}
