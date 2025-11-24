@@ -16,6 +16,8 @@ import { Input } from "@/components/ui/input";
 interface NewFilingDialogProps {
   clientId: string;
   clientEmail?: string | null;
+  clientName?: string; // optional; can be used later for display, etc.
+  onCreated?: () => void;
 }
 
 type IntakeMode = "client" | "lawyer";
@@ -23,7 +25,11 @@ type IntakeMode = "client" | "lawyer";
 const FORM_CODES = ["1041", "706", "709"] as const;
 type FormCode = (typeof FORM_CODES)[number];
 
-export function NewFilingDialog({ clientId, clientEmail }: NewFilingDialogProps) {
+export function NewFilingDialog(props: NewFilingDialogProps) {
+  const { clientId, clientEmail, onCreated } = props;
+  // NOTE: we accept clientName via props but don't currently use it.
+  // Keeping it off the destructuring avoids an unused variable warning.
+
   const router = useRouter();
 
   const [open, setOpen] = useState(false);
@@ -132,9 +138,12 @@ export function NewFilingDialog({ clientId, clientEmail }: NewFilingDialogProps)
         }
       }
 
-      // 4. Close dialog & refresh dashboard list
+      // 4. Close dialog, refresh dashboard list, and notify parent
       setOpen(false);
       router.refresh();
+      if (onCreated) {
+        onCreated();
+      }
     } catch (error) {
       console.error(error);
       alert("Error creating filing. Please try again.");

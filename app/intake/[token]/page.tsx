@@ -2,7 +2,7 @@
 
 import { redirect } from "next/navigation";
 import { createClient } from "@/utils/supabase/server";
-import { IntakeQuestionFlow } from "@/components/ui/intake/IntakeQuestionFlow";
+import IntakeQuestionFlow from "@/components/ui/intake/IntakeQuestionFlow";
 import type { FormField, FormAnswer } from "@/types/forms";
 
 interface Props {
@@ -25,12 +25,25 @@ export default async function ClientIntakePage({ params }: Props) {
     redirect("/");
   }
 
-  const filing = invite.filings;
+  // Normalize filings to a single filing object
+  const filings = invite.filings as
+    | { id: any; filing_type: any; tax_year: any }
+    | { id: any; filing_type: any; tax_year: any }[];
+
+  const filing = Array.isArray(filings) ? filings[0] : filings;
+
+  if (!filing) {
+    redirect("/");
+  }
+
   const formCode = filing.filing_type;
 
   if (formCode !== "1041") {
     redirect("/");
   }
+
+  // Capture inviteId so TS knows it's non-null inside the server action
+  const inviteId = invite.id;
 
   // 2. Load fields for the client audience
   const { data: fields, error: fieldsError } = await supabase.rpc(
@@ -70,7 +83,7 @@ export default async function ClientIntakePage({ params }: Props) {
     const { error } = await sb
       .from("client_invites")
       .update({ status: "submitted" })
-      .eq("id", invite.id);
+      .eq("id", inviteId);
 
     if (error) {
       console.error(error);

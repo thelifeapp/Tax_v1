@@ -1,10 +1,15 @@
 "use client";
 
-import { useEffect } from "react";
-import { supabase } from "@/lib/supabase";
+import { Suspense, useEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { supabase } from "@/lib/supabase";
 
-export default function AuthCallbackPage() {
+/**
+ * Inner client component that actually uses useSearchParams and runs
+ * the Supabase auth + firm membership logic.
+ * This MUST be rendered inside a <Suspense> boundary in Next 16.
+ */
+function AuthCallbackInner() {
   const router = useRouter();
   const params = useSearchParams();
 
@@ -28,7 +33,8 @@ export default function AuthCallbackPage() {
 
       if (error) {
         console.error("firm_members check:", error);
-        return router.replace("/dashboard"); // fail-open
+        // fail-open to dashboard on error
+        return router.replace("/dashboard");
       }
 
       if (mships && mships.length > 0) {
@@ -39,6 +45,7 @@ export default function AuthCallbackPage() {
       // 3) No firm yet → onboarding to capture name & firm
       router.replace("/onboarding");
     };
+
     run();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -47,5 +54,23 @@ export default function AuthCallbackPage() {
     <main className="min-h-screen grid place-items-center p-8">
       <p className="text-muted-foreground">Finishing sign-in…</p>
     </main>
+  );
+}
+
+/**
+ * Page component that wraps the inner client component in Suspense,
+ * satisfying Next.js 16's requirement for useSearchParams().
+ */
+export default function AuthCallbackPage() {
+  return (
+    <Suspense
+      fallback={
+        <main className="min-h-screen grid place-items-center p-8">
+          <p className="text-muted-foreground">Finishing sign-in…</p>
+        </main>
+      }
+    >
+      <AuthCallbackInner />
+    </Suspense>
   );
 }

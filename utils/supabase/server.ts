@@ -1,24 +1,22 @@
+// utils/supabase/server.ts
+
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
-import { cookies } from "next/headers";
 
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+
+/**
+ * Server-side Supabase client for RPCs and database operations
+ * that do NOT depend on Supabase Auth sessions.
+ *
+ * We intentionally do NOT pass a `cookies` option here because
+ * `@supabase/supabase-js`'s `createClient` does not accept it.
+ */
 export function createClient() {
-  const cookieStore = cookies();
-
-  return createSupabaseClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        getAll() {
-          return cookieStore.getAll();
-        },
-        setAll(cookiesToSet) {
-          cookiesToSet.forEach(({ name, value, options }) =>
-            cookieStore.set(name, value, options)
-          );
-        },
-      },
+  return createSupabaseClient(supabaseUrl, supabaseAnonKey, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false
     }
-  );
+  });
 }
-

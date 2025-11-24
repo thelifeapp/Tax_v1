@@ -77,7 +77,7 @@ const IntakeQuestionFlow = (props: IntakeQuestionFlowProps) => {
     });
 
     Object.values(bySection).forEach((arr) =>
-      arr.sort((a, b) => a.order - b.order)
+      arr.sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
     );
 
     return bySection;
