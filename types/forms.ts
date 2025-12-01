@@ -59,6 +59,10 @@ export interface FormField {
 
   // Multi-select/select options (jsonb array)
   options: string[] | null;
+
+  // 🔹 NEW — matches the `line_it` column in public.form_fields
+  // e.g. "1", "Line A", "7a", etc.
+  line_it: string | null;
 }
 
 // -----------------------------------------------------------------------------
