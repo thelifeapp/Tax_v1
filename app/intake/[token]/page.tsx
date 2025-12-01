@@ -6,12 +6,12 @@ import IntakeQuestionFlow from "@/components/ui/intake/IntakeQuestionFlow";
 import type { FormField, FormAnswer } from "@/types/forms";
 
 interface Props {
-  params: { token: string };
+  params: Promise<{ token: string }>; // 👈 Promise-wrapped params
 }
 
 export default async function ClientIntakePage({ params }: Props) {
   const supabase = createClient();
-  const token = params.token;
+  const { token } = await params; // 👈 unwrap the Promise
 
   // 1. Look up the invite + filing via the token
   const { data: invite, error: inviteError } = await supabase

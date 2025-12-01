@@ -7,6 +7,7 @@ type FieldRendererProps = {
   field: FormField1041;
   value: any;
   onChange: (fieldKey: string, val: any) => void;
+  filingId: string;
 };
 
 /**
@@ -101,16 +102,32 @@ function isAddressField(field: FormField1041): boolean {
   );
 }
 
-export function FieldRenderer({ field, value, onChange }: FieldRendererProps) {
+function getFileDisplayName(url: string): string {
+  try {
+    const parts = url.split("/");
+    const last = parts[parts.length - 1];
+    return decodeURIComponent(last);
+  } catch {
+    return url;
+  }
+}
+
+export function FieldRenderer({
+  field,
+  value,
+  onChange,
+  filingId,
+}: FieldRendererProps) {
   const {
     field_key,
     label,
     help_text,
     required,
     is_calculated,
-    calculation,
+    calculation, // kept in case we want it later
     source_notes,
     options,
+    line_it,
   } = field;
 
   const kind = resolveInputKind(field);
@@ -123,11 +140,20 @@ export function FieldRenderer({ field, value, onChange }: FieldRendererProps) {
     kind === "currency" ? formatCurrency(value) : ""
   );
 
-  // Ref for address autocomplete
+  // Address autocomplete
   const addressInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Ref for attachment input (so we can style a fake button)
+  // Attachment input
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [attachmentBusy, setAttachmentBusy] = useState(false);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+
+  // Info panel visibility for the "i" button
+  const [showInfo, setShowInfo] = useState(false);
+
+  // For now, only show info based on source_notes (user-facing description)
+  const hasInfo = !!source_notes;
+  const infoTitle = source_notes || "";
 
   useEffect(() => {
     if (!addressField || disabled) return;
@@ -190,17 +216,12 @@ export function FieldRenderer({ field, value, onChange }: FieldRendererProps) {
       return;
     }
 
-    if (kind === "attachment") {
-      const files = Array.from(target.files || []);
-      const fileNames = files.map((f) => f.name);
-      onChange(field_key, fileNames);
-      return;
-    }
-
+    // attachment handled separately
     onChange(field_key, target.value);
   };
 
   const handleCurrencyBlur = () => {
+    if (kind !== "currency") return;
     const cleaned = currencyDisplay.replace(/[^0-9.-]/g, "");
     const num = cleaned === "" ? null : Number(cleaned);
     if (num === null || Number.isNaN(num)) {
@@ -212,10 +233,86 @@ export function FieldRenderer({ field, value, onChange }: FieldRendererProps) {
     setCurrencyDisplay(formatCurrency(num));
   };
 
+  // ---------------------------
+  // Attachment helpers
+  // ---------------------------
+
+  const currentAttachmentUrls: string[] = Array.isArray(value) ? value : [];
+
+  const handleFilesSelected = async (
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+
+    setAttachmentBusy(true);
+    setAttachmentError(null);
+
+    try {
+      const formData = new FormData();
+      formData.append("filingId", filingId);
+      formData.append("fieldKey", field_key);
+
+      for (const f of files) {
+        formData.append("files", f);
+      }
+
+      const res = await fetch("/api/attachments/upload", {
+        method: "POST",
+        body: formData,
+      });
+
+      const json = await res.json();
+      if (!res.ok || !json?.success) {
+        throw new Error(json?.error || "Upload failed");
+      }
+
+      const newUrls: string[] = json.urls || [];
+      const merged = [...currentAttachmentUrls, ...newUrls];
+      onChange(field_key, merged);
+
+      // Reset input so same file can be selected again later if needed
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+    } catch (err: any) {
+      setAttachmentError(err?.message || "Upload failed");
+    } finally {
+      setAttachmentBusy(false);
+    }
+  };
+
+  const handleDeleteAttachment = async (url: string) => {
+    setAttachmentBusy(true);
+    setAttachmentError(null);
+
+    try {
+      const res = await fetch("/api/attachments/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      });
+
+      const json = await res.json();
+      if (!res.ok || !json?.success) {
+        throw new Error(json?.error || "Delete failed");
+      }
+
+      const remaining = currentAttachmentUrls.filter((u) => u !== url);
+      onChange(field_key, remaining);
+    } catch (err: any) {
+      setAttachmentError(err?.message || "Delete failed");
+    } finally {
+      setAttachmentBusy(false);
+    }
+  };
+
+  // ---------------------------
+  // Render input control
+  // ---------------------------
+
   const renderInput = () => {
-    // ---------------------------
     // Calculated fields: read-only
-    // ---------------------------
     if (disabled) {
       const inputType =
         kind === "currency"
@@ -230,31 +327,14 @@ export function FieldRenderer({ field, value, onChange }: FieldRendererProps) {
         kind === "currency" ? formatCurrency(value) : value ?? "";
 
       return (
-        <div className="flex items-start gap-2">
-          <input
-            type={inputType}
-            value={displayValue}
-            disabled
-            className="w-full rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700"
-          />
-          {(calculation || source_notes) && (
-            <button
-              type="button"
-              className="mt-1 inline-flex h-6 w-6 items-center justify-center rounded-full border border-gray-300 text-xs text-gray-500"
-              title={`${calculation || ""}${
-                calculation && source_notes ? " — " : ""
-              }${source_notes || ""}`}
-            >
-              i
-            </button>
-          )}
-        </div>
+        <input
+          type={inputType}
+          value={displayValue}
+          disabled
+          className="w-full rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700"
+        />
       );
     }
-
-    // ---------------------------
-    // Editable controls
-    // ---------------------------
 
     if (kind === "date") {
       return (
@@ -363,34 +443,62 @@ export function FieldRenderer({ field, value, onChange }: FieldRendererProps) {
     }
 
     if (kind === "attachment") {
-      const fileNames: string[] = Array.isArray(value) ? value : [];
-
       return (
         <div className="space-y-2">
-          {/* Hidden native input */}
           <input
             ref={fileInputRef}
             type="file"
             multiple
-            onChange={handleChange}
+            onChange={handleFilesSelected}
             className="hidden"
           />
 
-          {/* Pretty button */}
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
-            className="inline-flex items-center rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-100"
+            className="inline-flex items-center rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-60"
+            disabled={attachmentBusy}
           >
-            {fileNames.length > 0 ? "Add more files" : "Choose files"}
+            {attachmentBusy
+              ? "Uploading…"
+              : currentAttachmentUrls.length > 0
+              ? "Add more files"
+              : "Choose files"}
           </button>
 
-          {fileNames.length === 0 ? (
+          {currentAttachmentUrls.length === 0 ? (
             <p className="text-xs text-gray-400">No files attached yet.</p>
           ) : (
-            <p className="text-xs text-gray-500">
-              Attached: {fileNames.join(", ")}
-            </p>
+            <ul className="space-y-1 text-xs text-gray-600">
+              {currentAttachmentUrls.map((url) => (
+                <li
+                  key={url}
+                  className="flex items-center justify-between gap-2 rounded border border-gray-100 bg-gray-50 px-2 py-1"
+                >
+                  <a
+                    href={url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="truncate underline"
+                    title={url}
+                  >
+                    {getFileDisplayName(url)}
+                  </a>
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteAttachment(url)}
+                    className="text-[11px] text-red-600 hover:underline disabled:opacity-50"
+                    disabled={attachmentBusy}
+                  >
+                    Remove
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {attachmentError && (
+            <p className="text-xs text-red-600">{attachmentError}</p>
           )}
         </div>
       );
@@ -416,7 +524,7 @@ export function FieldRenderer({ field, value, onChange }: FieldRendererProps) {
           value
         )}`}
         target="_blank"
-        rel="noreferrer"
+        rel="noopener noreferrer"
         className="mt-1 block text-xs text-blue-600 underline"
       >
         Search this address on Google Maps
@@ -426,14 +534,43 @@ export function FieldRenderer({ field, value, onChange }: FieldRendererProps) {
   return (
     <div className="space-y-1">
       <label className="flex items-center justify-between text-sm font-medium text-gray-800">
-        <span>
-          {label}
-          {required && <span className="ml-1 text-xs text-gray-400">*</span>}
+        <span className="flex items-center gap-2">
+          {line_it && (
+            <span className="inline-flex items-center rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-mono text-gray-600">
+              Line {line_it}
+            </span>
+          )}
+          <span>
+            {label}
+            {required && (
+              <span className="ml-1 text-xs text-gray-400">*</span>
+            )}
+          </span>
         </span>
+
+        {hasInfo && (
+          <button
+            type="button"
+            className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-gray-300 bg-gray-50 text-[10px] text-gray-500"
+            title={infoTitle}
+            aria-label="View calculation details"
+            onClick={() => setShowInfo((v) => !v)}
+          >
+            i
+          </button>
+        )}
       </label>
+
       {help_text && (
         <p className="mb-1 max-w-prose text-xs text-gray-500">{help_text}</p>
       )}
+
+      {showInfo && hasInfo && (
+        <p className="mb-1 max-w-prose rounded-md border border-blue-100 bg-blue-50 p-2 text-xs text-blue-800">
+          {infoTitle}
+        </p>
+      )}
+
       {renderInput()}
       {addressMapsLink}
     </div>

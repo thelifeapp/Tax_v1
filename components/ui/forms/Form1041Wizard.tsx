@@ -1,6 +1,11 @@
 "use client";
 
-import React, { useMemo, useState } from "react";
+import React, {
+  useEffect,
+  useMemo,
+  useState,
+  useCallback,
+} from "react";
 import type { AudienceMode, FormField1041 } from "@/types/forms";
 import { FieldRenderer } from "@/components/ui/forms/FieldRenderer";
 
@@ -9,6 +14,7 @@ type Form1041WizardProps = {
   fields: FormField1041[];
   initialAnswers?: Record<string, any>;
   onSubmit?: (answers: Record<string, any>) => Promise<void> | void;
+  filingId: string;
 };
 
 type SectionGroup = {
@@ -102,6 +108,24 @@ function recomputeCalculatedFields(
   return changed ? next : current;
 }
 
+function countAnswered(answers: Record<string, any>, fields: FormField1041[]) {
+  let answered = 0;
+
+  for (const f of fields) {
+    if (f.is_calculated) continue; // don’t count auto-calculated
+
+    const v = answers[f.field_key];
+
+    if (v === null || v === undefined) continue;
+    if (typeof v === "string" && v.trim() === "") continue;
+    if (Array.isArray(v) && v.length === 0) continue;
+
+    answered++;
+  }
+
+  return answered;
+}
+
 // ---------------------------
 // Wizard component
 // ---------------------------
@@ -111,6 +135,7 @@ export function Form1041Wizard({
   fields,
   initialAnswers = {},
   onSubmit,
+  filingId,
 }: Form1041WizardProps) {
   const [answers, setAnswers] = useState<Record<string, any>>(
     recomputeCalculatedFields(initialAnswers, fields)
@@ -118,6 +143,42 @@ export function Form1041Wizard({
   const [currentStep, setCurrentStep] = useState(0);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // For “Progress saved.” banner + unsaved-changes detection
+  const [lastSavedSnapshot, setLastSavedSnapshot] = useState<Record<
+    string,
+    any
+  >>(initialAnswers);
+  const [saveStatus, setSaveStatus] = useState<
+    "idle" | "saving" | "saved" | "error"
+  >("idle");
+  const [saveMessage, setSaveMessage] = useState<string>("");
+
+  useEffect(() => {
+    // if initialAnswers change (new filing etc.), reset
+    setAnswers(recomputeCalculatedFields(initialAnswers, fields));
+    setLastSavedSnapshot(initialAnswers);
+  }, [initialAnswers, fields]);
+
+  const hasUnsavedChanges = useMemo(() => {
+    try {
+      return (
+        JSON.stringify(answers) !== JSON.stringify(lastSavedSnapshot)
+      );
+    } catch {
+      return true;
+    }
+  }, [answers, lastSavedSnapshot]);
+
+  // Auto-hide “Progress saved.” after 4s
+  useEffect(() => {
+    if (saveStatus !== "saved" && saveStatus !== "error") return;
+    const timer = setTimeout(() => {
+      setSaveStatus("idle");
+      setSaveMessage("");
+    }, 4000);
+    return () => clearTimeout(timer);
+  }, [saveStatus]);
 
   // Filter by audience + group by section
   const sections: SectionGroup[] = useMemo(() => {
@@ -171,12 +232,15 @@ export function Form1041Wizard({
   const totalSteps = sections.length;
   const step = sections[currentStep];
 
-  const completedCount = sections
-    .slice(0, currentStep)
-    .reduce((acc, s) => acc + s.fields.length, 0);
-  const totalFields = sections.reduce((acc, s) => acc + s.fields.length, 0);
+  const totalFields = sections.reduce(
+    (acc, s) => acc + s.fields.length,
+    0
+  );
+  const answeredCount = countAnswered(answers, fields);
   const overallProgress =
-    totalFields > 0 ? Math.round((completedCount / totalFields) * 100) : 0;
+    totalFields > 0
+      ? Math.round((answeredCount / totalFields) * 100)
+      : 0;
 
   const handleChange = (fieldKey: string, val: any) => {
     setAnswers((prev) => {
@@ -223,8 +287,39 @@ export function Form1041Wizard({
     return null;
   };
 
+  const performSave = useCallback(
+    async (showToast = true) => {
+      if (!onSubmit) return;
+
+      try {
+        setSaving(true);
+        if (showToast) {
+          setSaveStatus("saving");
+          setSaveMessage("Saving progress…");
+        }
+        await onSubmit(answers);
+        setLastSavedSnapshot(answers);
+        if (showToast) {
+          setSaveStatus("saved");
+          setSaveMessage("Progress saved.");
+        }
+      } catch (err: any) {
+        console.error("[Form1041Wizard] save error", err);
+        if (showToast) {
+          setSaveStatus("error");
+          setSaveMessage(
+            err?.message || "There was a problem saving your progress."
+          );
+        }
+      } finally {
+        setSaving(false);
+      }
+    },
+    [answers, onSubmit]
+  );
+
   const goNext = async () => {
-    // Only enforce required when finishing
+    // Only enforce required + final save when finishing
     if (currentStep === totalSteps - 1) {
       const validationError = validateAll();
       if (validationError) {
@@ -234,14 +329,7 @@ export function Form1041Wizard({
       setError(null);
 
       if (onSubmit) {
-        try {
-          setSaving(true);
-          await onSubmit(answers);
-        } catch (err: any) {
-          setError(err?.message || "Error saving form");
-        } finally {
-          setSaving(false);
-        }
+        await performSave(false);
       }
     } else {
       setError(null);
@@ -256,6 +344,25 @@ export function Form1041Wizard({
     }
   };
 
+  const handleTabClick = (index: number) => {
+    setCurrentStep(index);
+    // also clear any error banner when switching sections
+    setError(null);
+  };
+
+  const handleClose = async () => {
+    if (hasUnsavedChanges) {
+      const ok = window.confirm(
+        "You have unsaved changes. Would you like to save before leaving?"
+      );
+      if (ok) {
+        await performSave();
+      }
+    }
+    // back to dashboard
+    window.location.href = "/dashboard";
+  };
+
   if (sections.length === 0) {
     return (
       <div className="rounded-md border border-gray-200 bg-gray-50 p-4 text-sm text-gray-600">
@@ -266,12 +373,54 @@ export function Form1041Wizard({
 
   return (
     <div className="space-y-6">
-      {/* Overall progress */}
-      <div className="space-y-1">
-        <div className="flex items-center justify-between text-xs text-gray-500">
-          <span>Form 1041 progress</span>
-          <span>{overallProgress}% complete</span>
+      {/* Top floating save banner */}
+      {saveStatus !== "idle" && saveMessage && (
+        <div
+          className={`fixed left-1/2 top-4 z-20 -translate-x-1/2 transform rounded-full border px-4 py-2 text-xs shadow ${
+            saveStatus === "saved"
+              ? "border-green-200 bg-green-50 text-green-700"
+              : saveStatus === "error"
+              ? "border-red-200 bg-red-50 text-red-700"
+              : "border-gray-200 bg-white text-gray-600"
+          }`}
+        >
+          {saveMessage}
         </div>
+      )}
+
+      {/* Overall progress + Save / Close */}
+      <div className="space-y-2">
+        <div className="flex items-center justify-between gap-4 text-xs text-gray-500">
+          <div>
+            <div className="flex items-center gap-2">
+              <span>Form 1041 progress</span>
+            </div>
+            <div className="mt-0.5 text-[11px] text-gray-400">
+              {overallProgress}% complete · {answeredCount} of {totalFields}{" "}
+              questions answered
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => performSave()}
+              disabled={saving || !onSubmit}
+              className="inline-flex items-center gap-1 rounded-full border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 shadow-sm hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {saving ? "Saving…" : "Save progress"}
+            </button>
+            <button
+              type="button"
+              onClick={handleClose}
+              className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-gray-300 bg-white text-xs text-gray-500 hover:bg-gray-50"
+              aria-label="Back to dashboard"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+
         <div className="h-2 w-full overflow-hidden rounded-full bg-gray-100">
           <div
             className="h-2 rounded-full bg-blue-500 transition-all"
@@ -280,10 +429,37 @@ export function Form1041Wizard({
         </div>
       </div>
 
+      {/* Tabs (file-tab style, no scrollbar, wraps if needed) */}
+      <div className="border-b border-gray-200 pb-1">
+        <div className="flex flex-wrap gap-1 text-xs">
+          {sections.map((s, idx) => {
+            const isActive = idx === currentStep;
+            return (
+              <button
+                key={s.name}
+                type="button"
+                onClick={() => handleTabClick(idx)}
+                className={[
+                  "rounded-t-md px-3 py-1",
+                  "border",
+                  isActive
+                    ? "border-gray-300 border-b-white bg-white text-gray-900"
+                    : "border-transparent bg-gray-50 text-gray-500 hover:bg-gray-100",
+                ].join(" ")}
+              >
+                {s.name}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       {/* Step header */}
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-lg font-semibold text-gray-900">{step.name}</h2>
+          <h2 className="text-lg font-semibold text-gray-900">
+            {step.name}
+          </h2>
           <p className="text-xs text-gray-500">
             Step {currentStep + 1} of {totalSteps}
           </p>
@@ -304,6 +480,7 @@ export function Form1041Wizard({
               field={field}
               value={answers[field.field_key]}
               onChange={handleChange}
+              filingId={filingId}
             />
           </div>
         ))}

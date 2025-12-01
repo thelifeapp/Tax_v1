@@ -192,13 +192,19 @@ async function replaceFormFieldsForTemplate(
         optionsArray = ops.length > 0 ? ops : null;
       }
 
-      // -------------------------------------------------------------------
+        // -------------------------------------------------------------------
       // validations JSON (for non-critical metadata; UI will use columns)
       // -------------------------------------------------------------------
       const validationsObj: Record<string, any> = {};
 
-      const lineItem = (raw.line_item || "").toString().trim();
-      if (lineItem) validationsObj.line_item = lineItem;
+      // Line number from sheet (support both "line_it" and old "line_item")
+      const lineIt =
+        (raw.line_it || raw.line_item || "").toString().trim() || null;
+
+      // Keep also in validations for any legacy uses
+      if (lineIt) {
+        validationsObj.line_item = lineIt;
+      }
 
       const pattern = (raw.patern || "").toString().trim();
       if (pattern) validationsObj.pattern = pattern;
@@ -218,7 +224,7 @@ async function replaceFormFieldsForTemplate(
 
       const optionsJson = optionsArray ? JSON.stringify(optionsArray) : null;
 
-      // INSERT with all columns
+      // INSERT with all columns (including line_it)
       await client.query(
         `
         INSERT INTO public.form_fields (
@@ -240,11 +246,12 @@ async function replaceFormFieldsForTemplate(
           calculation,
           source_notes,
           visibility_condition,
-          options
+          options,
+          line_it
         )
         VALUES (
           $1,$2,$3,$4,$5,$6,$7,$8,$9,
-          $10,$11,$12,$13,$14,$15,$16,$17,$18,$19
+          $10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20
         )
       `,
         [
@@ -266,9 +273,11 @@ async function replaceFormFieldsForTemplate(
           calculation,
           sourceNotes,
           visibilityCondition,
-          optionsJson               // jsonb
+          optionsJson,             // jsonb
+          lineIt                   // <-- new column
         ]
       );
+
 
       insertedCount++;
     }
