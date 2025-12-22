@@ -4,9 +4,10 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Pool } from "pg";
 import { Button } from "@/components/ui/button";
+import { Download1041PdfButton } from "@/components/ui/Download1041PdfButton"; // 👈 NEW IMPORT
 
 // -----------------------------------------------------------------------------
-// DB setup (same pattern as intake page)
+// DB setup
 // -----------------------------------------------------------------------------
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -65,11 +66,11 @@ async function getFilingWithClient(filingId: string) {
 // -----------------------------------------------------------------------------
 
 type PageProps = {
-  params: Promise<{ filingId: string }>; // 👈 Promise-wrapped params in your setup
+  params: Promise<{ filingId: string }>; // 👈 your current setup
 };
 
 export default async function FilingDetailPage({ params }: PageProps) {
-  const { filingId } = await params; // 👈 unwrap the Promise
+  const { filingId } = await params; // unwrap the Promise
 
   const row = await getFilingWithClient(filingId);
   if (!row) {
@@ -84,6 +85,7 @@ export default async function FilingDetailPage({ params }: PageProps) {
   return (
     <main className="p-6">
       <div className="max-w-3xl mx-auto space-y-6">
+
         {/* Header */}
         <div>
           <h1 className="text-2xl font-semibold mb-1">
@@ -117,6 +119,7 @@ export default async function FilingDetailPage({ params }: PageProps) {
 
         {/* Actions */}
         <div className="flex flex-wrap gap-3">
+
           <Link href={`/filings/${row.id}/intake`}>
             <Button>Open lawyer intake</Button>
           </Link>
@@ -124,9 +127,12 @@ export default async function FilingDetailPage({ params }: PageProps) {
           <Link href="/dashboard">
             <Button variant="outline">Back to dashboard</Button>
           </Link>
+
+          {/* 👇 NEW BUTTON — Download 1041 PDF */}
+          <Download1041PdfButton filingId={row.id} />
         </div>
 
-        {/* Placeholder for future: summaries, docs, etc. */}
+        {/* Placeholder for future */}
         <div className="rounded-xl border bg-white p-6 text-sm text-muted-foreground">
           <p>
             This is the filing detail view. In future versions, this is where
@@ -134,6 +140,7 @@ export default async function FilingDetailPage({ params }: PageProps) {
             history for this filing.
           </p>
         </div>
+
       </div>
     </main>
   );

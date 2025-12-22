@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import NewClientDialog from "@/components/ui/NewClientDialog";
 import NewFilingDialog from "@/components/ui/NewFilingDialog";
 import { Trash2 } from "lucide-react";
+import { Download1041PdfButton } from "@/components/ui/Download1041PdfButton"; // 👈 NEW
 
 type Client = {
   id: string;
@@ -197,7 +198,9 @@ export default function DashboardPage() {
         </h1>
 
         <div className="flex items-center gap-3">
-          {firmId && <NewClientDialog firmId={firmId} onCreated={triggerRefresh} />}
+          {firmId && (
+            <NewClientDialog firmId={firmId} onCreated={triggerRefresh} />
+          )}
 
           {firmName && (
             <span className="text-xs rounded-full border px-2 py-1 text-muted-foreground">
@@ -228,7 +231,9 @@ export default function DashboardPage() {
         {loading ? (
           <div className="p-6 text-sm text-muted-foreground">Loading…</div>
         ) : clients.length === 0 ? (
-          <div className="p-6 text-sm text-muted-foreground">No clients yet.</div>
+          <div className="p-6 text-sm text-muted-foreground">
+            No clients yet.
+          </div>
         ) : (
           <ul className="divide-y">
             {clients.map((c) => {
@@ -351,18 +356,27 @@ export default function DashboardPage() {
                                       : ""
                                   }`}
                                 >
-                                  <button
-                                    type="button"
-                                    onClick={(e) => {
-                                      e.stopPropagation(); // don't navigate
-                                      deleteFiling(f);
-                                    }}
-                                    className="inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs text-muted-foreground hover:bg-muted"
-                                    disabled={deletingFilingId === f.id}
-                                    title="Delete filing"
-                                  >
-                                    <Trash2 className="h-4 w-4" />
-                                  </button>
+                                  <div className="flex items-center justify-end gap-2">
+                                    {/* Download 1041 PDF button (small icon) */}
+                                    <Download1041PdfButton
+                                      filingId={f.id}
+                                      iconOnly
+                                    />
+
+                                    {/* Delete filing */}
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation(); // don't navigate
+                                        deleteFiling(f);
+                                      }}
+                                      className="inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs text-muted-foreground hover:bg-muted"
+                                      disabled={deletingFilingId === f.id}
+                                      title="Delete filing"
+                                    >
+                                      <Trash2 className="h-4 w-4" />
+                                    </button>
+                                  </div>
                                 </td>
                               </tr>
                             ))}
