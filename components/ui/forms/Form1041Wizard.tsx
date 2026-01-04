@@ -1,28 +1,18 @@
 "use client";
 
-import React, {
-  useEffect,
-  useMemo,
-  useState,
-  useCallback,
-} from "react";
+import React, { useMemo, useState, useCallback, useRef, useEffect } from "react";
 import type { AudienceMode, FormField1041 } from "@/types/forms";
 import { FieldRenderer } from "@/components/ui/forms/FieldRenderer";
 
 type Form1041WizardProps = {
-  audience: AudienceMode; // 'lawyer' or 'client'
+  audience: AudienceMode; // "lawyer" | "client"
   fields: FormField1041[];
   initialAnswers?: Record<string, any>;
   onSubmit?: (answers: Record<string, any>) => Promise<void> | void;
   filingId: string;
 };
 
-type SectionGroup = {
-  name: string;
-  fields: FormField1041[];
-};
-
-const SECTION_ORDER = [
+const SECTION_LABELS: string[] = [
   "Header",
   "Income",
   "Deductions",
@@ -33,320 +23,313 @@ const SECTION_ORDER = [
   "Schedule G Part II",
   "Other Information",
   "Preparer",
+  "Signature",
 ];
 
-// ---------------------------
-// Calculation helpers
-// ---------------------------
-
-function parseNumber(val: any): number {
-  if (val === null || val === undefined || val === "") return 0;
-  if (typeof val === "number") return val;
-  const n = Number(String(val).replace(/[^0-9.-]/g, ""));
-  return Number.isNaN(n) ? 0 : n;
+function stableStringify(obj: any) {
+  try {
+    return JSON.stringify(obj ?? {});
+  } catch {
+    return String(Date.now());
+  }
 }
 
-function evaluateCalculation(
-  expr: string,
-  answers: Record<string, any>
-): number | null {
-  if (!expr) return null;
+/** -----------------------------
+ *  Calculations engine
+ *  ----------------------------- */
+function toNumber(val: any): number {
+  if (val === null || val === undefined || val === "") return 0;
+  if (typeof val === "number") return Number.isFinite(val) ? val : 0;
+  if (typeof val === "boolean") return val ? 1 : 0;
 
-  const tokens = expr
-    .split(/([+\-])/)
-    .map((t) => t.trim())
-    .filter(Boolean);
-  if (tokens.length === 0) return null;
+  if (typeof val === "object") {
+    if ("value" in val) return toNumber((val as any).value);
+    if ("text" in val) return toNumber((val as any).text);
+    if (Array.isArray(val)) return val.map(toNumber).reduce((a, b) => a + b, 0);
+    return 0;
+  }
 
-  let result = 0;
-  let sign = 1;
+  const s = String(val);
+  const cleaned = s.replace(/[^0-9.\-]/g, "");
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : 0;
+}
 
-  for (const token of tokens) {
-    if (token === "+") {
-      sign = 1;
-      continue;
+function extractIdentifiers(expr: string): string[] {
+  const raw = expr.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? [];
+  const banned = new Set(["min", "max", "Math"]);
+  return raw.filter((x) => !banned.has(x));
+}
+
+function evalExpression(expr: string, ctx: Record<string, number>): number {
+  let jsExpr = expr;
+
+  jsExpr = jsExpr.replace(/\bmin\s*\(/g, "Math.min(");
+  jsExpr = jsExpr.replace(/\bmax\s*\(/g, "Math.max(");
+
+  const ids = extractIdentifiers(expr);
+  ids.sort((a, b) => b.length - a.length);
+
+  for (const id of ids) {
+    const re = new RegExp(`\\b${id}\\b`, "g");
+    jsExpr = jsExpr.replace(re, `(__ctx["${id}"] ?? 0)`);
+  }
+
+  try {
+    // eslint-disable-next-line no-new-func
+    const fn = new Function("__ctx", `return (${jsExpr});`);
+    const out = fn(ctx);
+    const num = Number(out);
+    return Number.isFinite(num) ? num : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function computeCalculated(fields: FormField1041[], answers: Record<string, any>) {
+  const calcFields = fields.filter(
+    (f) => f.is_calculated === true && String(f.calculation ?? "").trim() !== ""
+  );
+
+  const ctx: Record<string, number> = {};
+  for (const [k, v] of Object.entries(answers ?? {})) {
+    ctx[k] = toNumber(v);
+  }
+
+  const result: Record<string, any> = {};
+  if (calcFields.length === 0) return result;
+
+  const pending = new Set(calcFields.map((f) => f.field_key));
+  const fieldByKey = new Map(calcFields.map((f) => [f.field_key, f]));
+
+  for (let pass = 0; pass < calcFields.length + 5; pass++) {
+    let progress = false;
+
+    for (const key of Array.from(pending)) {
+      const f = fieldByKey.get(key);
+      if (!f) {
+        pending.delete(key);
+        continue;
+      }
+
+      const expr = String(f.calculation ?? "").trim();
+      const valueNum = evalExpression(expr, ctx);
+
+      ctx[key] = valueNum;
+      result[key] = valueNum;
+
+      pending.delete(key);
+      progress = true;
     }
-    if (token === "-") {
-      sign = -1;
-      continue;
-    }
 
-    const asNum = Number(token);
-    let value: number;
-    if (!Number.isNaN(asNum)) {
-      value = asNum;
-    } else {
-      const v = answers[token];
-      value = parseNumber(v);
-    }
-
-    result += sign * value;
+    if (!progress) break;
+    if (pending.size === 0) break;
   }
 
   return result;
 }
 
-function recomputeCalculatedFields(
-  current: Record<string, any>,
-  fields: FormField1041[]
-): Record<string, any> {
-  let changed = false;
-  const next: Record<string, any> = { ...current };
-
-  for (const f of fields) {
-    if (!f.is_calculated || !f.calculation) continue;
-
-    const val = evaluateCalculation(f.calculation, next);
-    if (val === null) continue;
-
-    if (next[f.field_key] !== val) {
-      next[f.field_key] = val;
-      changed = true;
-    }
-  }
-
-  return changed ? next : current;
+/** -----------------------------
+ *  Search helpers
+ *  ----------------------------- */
+function normalizeSearch(s: string) {
+  return s
+    .toLowerCase()
+    .trim()
+    .replace(/[’']/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-function countAnswered(answers: Record<string, any>, fields: FormField1041[]) {
-  let answered = 0;
-
-  for (const f of fields) {
-    if (f.is_calculated) continue; // don’t count auto-calculated
-
-    const v = answers[f.field_key];
-
-    if (v === null || v === undefined) continue;
-    if (typeof v === "string" && v.trim() === "") continue;
-    if (Array.isArray(v) && v.length === 0) continue;
-
-    answered++;
-  }
-
-  return answered;
+function tokenizeQuery(q: string): string[] {
+  const n = normalizeSearch(q);
+  if (!n) return [];
+  return n.split(" ").filter(Boolean);
 }
 
-// ---------------------------
-// Wizard component
-// ---------------------------
+function escapeRegExp(s: string) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
-export function Form1041Wizard({
-  audience,
-  fields,
-  initialAnswers = {},
-  onSubmit,
-  filingId,
-}: Form1041WizardProps) {
-  const [answers, setAnswers] = useState<Record<string, any>>(
-    recomputeCalculatedFields(initialAnswers, fields)
-  );
-  const [currentStep, setCurrentStep] = useState(0);
-  const [saving, setSaving] = useState(false);
+/**
+ * Highlight tokens (case-insensitive) in a display string.
+ * - Uses simple token matching (not normalized matching) to keep UI intuitive.
+ * - Safe: returns plain React nodes (no dangerouslySetInnerHTML).
+ */
+function highlightText(display: string, queryTokens: string[]) {
+  if (!display) return display;
+  if (!queryTokens || queryTokens.length === 0) return display;
+
+  const tokens = Array.from(new Set(queryTokens.map((t) => t.trim()).filter(Boolean)));
+  if (tokens.length === 0) return display;
+
+  const pattern = tokens.map(escapeRegExp).join("|");
+  const re = new RegExp(`(${pattern})`, "ig");
+
+  const parts = display.split(re);
+
+  return parts.map((part, idx) => {
+    const isHit = tokens.some((t) => part.toLowerCase() === t.toLowerCase());
+    if (!isHit) return <React.Fragment key={idx}>{part}</React.Fragment>;
+
+    return (
+      <mark
+        key={idx}
+        className="rounded bg-yellow-100 px-1 py-0.5 text-gray-900"
+      >
+        {part}
+      </mark>
+    );
+  });
+}
+
+export function Form1041Wizard(props: Form1041WizardProps) {
+  const { audience, fields, initialAnswers = {}, onSubmit, filingId } = props;
+
+  const initialSnapshotRef = useRef<string>(stableStringify(initialAnswers));
+  const hasInitializedRef = useRef<boolean>(false);
+
+  const [answers, setAnswers] = useState<Record<string, any>>(() => ({
+    ...(initialAnswers ?? {}),
+  }));
+
+  const [currentStep, setCurrentStep] = useState<number>(0);
+  const [saving, setSaving] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
-  // For “Progress saved.” banner + unsaved-changes detection
-  const [lastSavedSnapshot, setLastSavedSnapshot] = useState<Record<
-    string,
-    any
-  >>(initialAnswers);
-  const [saveStatus, setSaveStatus] = useState<
-    "idle" | "saving" | "saved" | "error"
-  >("idle");
-  const [saveMessage, setSaveMessage] = useState<string>("");
+  const [lastSavedSnapshot, setLastSavedSnapshot] = useState<string>(() =>
+    stableStringify(initialAnswers)
+  );
+
+  // ✅ “Progress saved” banner
+  const [showSavedBanner, setShowSavedBanner] = useState(false);
+  const savedTimerRef = useRef<number | null>(null);
+
+  // ✅ Left index / sidebar
+  const [indexOpen, setIndexOpen] = useState(true);
+  const [openSections, setOpenSections] = useState<Record<string, boolean>>({});
+  const [indexQuery, setIndexQuery] = useState("");
 
   useEffect(() => {
-    // if initialAnswers change (new filing etc.), reset
-    setAnswers(recomputeCalculatedFields(initialAnswers, fields));
-    setLastSavedSnapshot(initialAnswers);
-  }, [initialAnswers, fields]);
+    const nextSnapshot = stableStringify(initialAnswers);
+
+    if (!hasInitializedRef.current) {
+      hasInitializedRef.current = true;
+      initialSnapshotRef.current = nextSnapshot;
+      setAnswers({ ...(initialAnswers ?? {}) });
+      setLastSavedSnapshot(nextSnapshot);
+      return;
+    }
+
+    if (nextSnapshot !== initialSnapshotRef.current) {
+      const localSnapshot = stableStringify(answers);
+      const safeToReplace = localSnapshot === lastSavedSnapshot;
+
+      if (safeToReplace) {
+        initialSnapshotRef.current = nextSnapshot;
+        setAnswers({ ...(initialAnswers ?? {}) });
+        setLastSavedSnapshot(nextSnapshot);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filingId]);
+
+  useEffect(() => {
+    return () => {
+      if (savedTimerRef.current) window.clearTimeout(savedTimerRef.current);
+    };
+  }, []);
 
   const hasUnsavedChanges = useMemo(() => {
-    try {
-      return (
-        JSON.stringify(answers) !== JSON.stringify(lastSavedSnapshot)
-      );
-    } catch {
-      return true;
-    }
+    return stableStringify(answers) !== lastSavedSnapshot;
   }, [answers, lastSavedSnapshot]);
 
-  // Auto-hide “Progress saved.” after 4s
+  // Group fields into sections (stable order)
+  const sections = useMemo(() => {
+    const map = new Map<string, FormField1041[]>();
+    for (const f of fields) {
+      const s = (f.section ?? "Header").trim() || "Header";
+      if (!map.has(s)) map.set(s, []);
+      map.get(s)!.push(f);
+    }
+
+    for (const [k, arr] of map.entries()) {
+      arr.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+      map.set(k, arr);
+    }
+
+    const ordered: { name: string; fields: FormField1041[] }[] = [];
+    for (const label of SECTION_LABELS) {
+      if (map.has(label)) {
+        ordered.push({ name: label, fields: map.get(label)! });
+        map.delete(label);
+      }
+    }
+    for (const [name, flds] of map.entries()) {
+      ordered.push({ name, fields: flds });
+    }
+
+    return ordered;
+  }, [fields]);
+
+  // Default expand current section
   useEffect(() => {
-    if (saveStatus !== "saved" && saveStatus !== "error") return;
-    const timer = setTimeout(() => {
-      setSaveStatus("idle");
-      setSaveMessage("");
+    if (sections.length === 0) return;
+    const current = sections[currentStep]?.name;
+    if (!current) return;
+    setOpenSections((prev) => ({ ...prev, [current]: true }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentStep, sections.length]);
+
+  const updateAnswer = useCallback((fieldKey: string, value: any) => {
+    setAnswers((prev) => ({ ...prev, [fieldKey]: value }));
+  }, []);
+
+  // ✅ compute calculated values live
+  const calculatedAnswers = useMemo(() => {
+    return computeCalculated(fields, answers);
+  }, [fields, answers]);
+
+  const derivedAnswers = useMemo(() => {
+    return { ...(answers ?? {}), ...(calculatedAnswers ?? {}) };
+  }, [answers, calculatedAnswers]);
+
+  const triggerSavedBanner = useCallback(() => {
+    setShowSavedBanner(true);
+    if (savedTimerRef.current) window.clearTimeout(savedTimerRef.current);
+    savedTimerRef.current = window.setTimeout(() => {
+      setShowSavedBanner(false);
     }, 4000);
-    return () => clearTimeout(timer);
-  }, [saveStatus]);
+  }, []);
 
-  // Filter by audience + group by section
-  const sections: SectionGroup[] = useMemo(() => {
-    const filtered = fields
-      .filter((f) => f.form_code === "1041")
-      .filter((f) => {
-        const aud = (f.audience || "both").toLowerCase();
+  const performSave = useCallback(async () => {
+    if (!onSubmit) return;
 
-        // PRO VIEW (lawyer): see all fields
-        if (audience === "lawyer") return true;
+    setSaving(true);
+    setError(null);
 
-        // Client view: only client + both
-        if (audience === "client") {
-          return aud === "client" || aud === "both";
-        }
+    try {
+      const payloadToSave = {
+        ...(answers ?? {}),
+        ...(computeCalculated(fields, answers) ?? {}),
+      };
 
-        return true;
-      });
+      await onSubmit(payloadToSave);
 
-    const bySection = new Map<string, FormField1041[]>();
-
-    for (const f of filtered) {
-      const section = f.section || "Other";
-      if (!bySection.has(section)) bySection.set(section, []);
-      bySection.get(section)!.push(f);
+      setLastSavedSnapshot(stableStringify(answers));
+      triggerSavedBanner();
+    } catch (e) {
+      console.error(e);
+      setError("Could not save. Please try again.");
+      throw e;
+    } finally {
+      setSaving(false);
     }
-
-    const groups: SectionGroup[] = [];
-
-    for (const section of SECTION_ORDER) {
-      if (bySection.has(section)) {
-        const list = bySection
-          .get(section)!
-          .slice()
-          .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
-        groups.push({ name: section, fields: list });
-        bySection.delete(section);
-      }
-    }
-
-    for (const [section, list] of bySection.entries()) {
-      groups.push({
-        name: section,
-        fields: list.slice().sort((a, b) => (a.order ?? 0) - (b.order ?? 0)),
-      });
-    }
-
-    return groups;
-  }, [fields, audience]);
-
-  const totalSteps = sections.length;
-  const step = sections[currentStep];
-
-  const totalFields = sections.reduce(
-    (acc, s) => acc + s.fields.length,
-    0
-  );
-  const answeredCount = countAnswered(answers, fields);
-  const overallProgress =
-    totalFields > 0
-      ? Math.round((answeredCount / totalFields) * 100)
-      : 0;
-
-  const handleChange = (fieldKey: string, val: any) => {
-    setAnswers((prev) => {
-      const updated = { ...prev, [fieldKey]: val };
-      return recomputeCalculatedFields(updated, fields);
-    });
-  };
-
-  // Validate ALL fields (used only on final submit)
-  const validateAll = (): string | null => {
-    const missingRequired: string[] = [];
-
-    for (const s of sections) {
-      for (const f of s.fields) {
-        if (!f.required) continue;
-        if (f.is_calculated) continue;
-
-        const inputType = (f.input_type || "").toLowerCase();
-        const v = answers[f.field_key];
-
-        // Single checkbox: allowed to remain unchecked
-        if (inputType.includes("checkbox") && inputType.includes("single")) {
-          continue;
-        }
-
-        // Multi-select required: at least one
-        if (inputType.includes("checkbox") && inputType.includes("multi")) {
-          if (!Array.isArray(v) || v.length === 0) {
-            missingRequired.push(f.label);
-          }
-          continue;
-        }
-
-        if (v === undefined || v === null || v === "") {
-          missingRequired.push(f.label);
-        }
-      }
-    }
-
-    if (missingRequired.length > 0) {
-      return `Please fill required fields: ${missingRequired.join(", ")}`;
-    }
-
-    return null;
-  };
-
-  const performSave = useCallback(
-    async (showToast = true) => {
-      if (!onSubmit) return;
-
-      try {
-        setSaving(true);
-        if (showToast) {
-          setSaveStatus("saving");
-          setSaveMessage("Saving progress…");
-        }
-        await onSubmit(answers);
-        setLastSavedSnapshot(answers);
-        if (showToast) {
-          setSaveStatus("saved");
-          setSaveMessage("Progress saved.");
-        }
-      } catch (err: any) {
-        console.error("[Form1041Wizard] save error", err);
-        if (showToast) {
-          setSaveStatus("error");
-          setSaveMessage(
-            err?.message || "There was a problem saving your progress."
-          );
-        }
-      } finally {
-        setSaving(false);
-      }
-    },
-    [answers, onSubmit]
-  );
-
-  const goNext = async () => {
-    // Only enforce required + final save when finishing
-    if (currentStep === totalSteps - 1) {
-      const validationError = validateAll();
-      if (validationError) {
-        setError(validationError);
-        return;
-      }
-      setError(null);
-
-      if (onSubmit) {
-        await performSave(false);
-      }
-    } else {
-      setError(null);
-      setCurrentStep((s) => s + 1);
-    }
-  };
-
-  const goBack = () => {
-    if (currentStep > 0) {
-      setCurrentStep((s) => s - 1);
-      setError(null);
-    }
-  };
+  }, [answers, fields, onSubmit, triggerSavedBanner]);
 
   const handleTabClick = (index: number) => {
     setCurrentStep(index);
-    // also clear any error banner when switching sections
     setError(null);
   };
 
@@ -356,12 +339,72 @@ export function Form1041Wizard({
         "You have unsaved changes. Would you like to save before leaving?"
       );
       if (ok) {
-        await performSave();
+        try {
+          await performSave();
+        } catch {
+          // allow leave anyway
+        }
       }
     }
-    // back to dashboard
     window.location.href = "/dashboard";
   };
+
+  const handleDownload = useCallback(() => {
+    window.location.href = `/api/filings/${filingId}/1041/pdf`;
+  }, [filingId]);
+
+  const scrollToField = useCallback((fieldKey: string) => {
+    window.setTimeout(() => {
+      const el = document.getElementById(`field-${fieldKey}`);
+      if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 50);
+  }, []);
+
+  const handleIndexClick = useCallback(
+    (sectionIndex: number, fieldKey: string) => {
+      setCurrentStep(sectionIndex);
+      setError(null);
+      setOpenSections((prev) => ({
+        ...prev,
+        [sections[sectionIndex]?.name ?? ""]: true,
+      }));
+      scrollToField(fieldKey);
+    },
+    [scrollToField, sections]
+  );
+
+  const normalizedQuery = useMemo(() => normalizeSearch(indexQuery), [indexQuery]);
+  const queryTokens = useMemo(() => tokenizeQuery(indexQuery), [indexQuery]);
+  const hasQuery = normalizedQuery.length > 0;
+
+  // Filtered view of sections/fields for index search
+  const filteredIndexSections = useMemo(() => {
+    if (!hasQuery) return sections;
+
+    const out: { name: string; fields: FormField1041[] }[] = [];
+    for (const sec of sections) {
+      const filteredFields = sec.fields.filter((f) => {
+        const hay = normalizeSearch(
+          `${sec.name} ${f.label ?? ""} ${f.line_it ?? ""} ${f.field_key ?? ""}`
+        );
+        return hay.includes(normalizedQuery);
+      });
+      if (filteredFields.length > 0) {
+        out.push({ name: sec.name, fields: filteredFields });
+      }
+    }
+    return out;
+  }, [sections, hasQuery, normalizedQuery]);
+
+  // Auto-expand sections when searching so results are visible
+  useEffect(() => {
+    if (!hasQuery) return;
+    setOpenSections((prev) => {
+      const next = { ...prev };
+      for (const s of filteredIndexSections) next[s.name] = true;
+      return next;
+    });
+  }, [hasQuery, filteredIndexSections]);
 
   if (sections.length === 0) {
     return (
@@ -371,33 +414,179 @@ export function Form1041Wizard({
     );
   }
 
-  return (
-    <div className="space-y-6">
-      {/* Top floating save banner */}
-      {saveStatus !== "idle" && saveMessage && (
-        <div
-          className={`fixed left-1/2 top-4 z-20 -translate-x-1/2 transform rounded-full border px-4 py-2 text-xs shadow ${
-            saveStatus === "saved"
-              ? "border-green-200 bg-green-50 text-green-700"
-              : saveStatus === "error"
-              ? "border-red-200 bg-red-50 text-red-700"
-              : "border-gray-200 bg-white text-gray-600"
-          }`}
-        >
-          {saveMessage}
-        </div>
-      )}
+  const isLastStep = currentStep >= sections.length - 1;
+  const currentSection = sections[currentStep];
 
-      {/* Overall progress + Save / Close */}
-      <div className="space-y-2">
-        <div className="flex items-center justify-between gap-4 text-xs text-gray-500">
-          <div>
-            <div className="flex items-center gap-2">
-              <span>Form 1041 progress</span>
+  const totalSteps = sections.length;
+  const stepNumber = Math.min(currentStep + 1, totalSteps);
+  const pctTabs = totalSteps > 0 ? Math.round((stepNumber / totalSteps) * 100) : 0;
+
+  const handleNextOrFinish = async () => {
+    setError(null);
+
+    if (!isLastStep) {
+      setCurrentStep((s) => Math.min(s + 1, sections.length - 1));
+      return;
+    }
+
+    try {
+      if (onSubmit) await performSave();
+    } catch {
+      return;
+    }
+
+    window.location.href = `/filings/${filingId}/print`;
+  };
+
+  const handleBack = () => {
+    if (currentStep > 0) {
+      setCurrentStep((s) => s - 1);
+      setError(null);
+    }
+  };
+
+  return (
+    <div className="flex gap-6">
+      {/* LEFT INDEX */}
+      <div className={`shrink-0 ${indexOpen ? "w-72" : "w-12"}`}>
+        <div className="sticky top-4">
+          <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
+            <div className="flex items-center justify-between px-3 py-2">
+              <div className={`text-sm font-medium text-gray-900 ${indexOpen ? "" : "hidden"}`}>
+                Index
+              </div>
+              <button
+                type="button"
+                onClick={() => setIndexOpen((v) => !v)}
+                className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-gray-200 bg-white text-xs text-gray-600 hover:bg-gray-50"
+                title={indexOpen ? "Collapse index" : "Expand index"}
+                aria-label="Toggle index"
+              >
+                {indexOpen ? "⟨" : "⟩"}
+              </button>
             </div>
-            <div className="mt-0.5 text-[11px] text-gray-400">
-              {overallProgress}% complete · {answeredCount} of {totalFields}{" "}
-              questions answered
+
+            {indexOpen && (
+              <div className="max-h-[78vh] overflow-auto border-t border-gray-100 p-2">
+                {/* Search */}
+                <div className="mb-2 px-1">
+                  <input
+                    value={indexQuery}
+                    onChange={(e) => setIndexQuery(e.target.value)}
+                    placeholder='Search lines (e.g., "interest income")'
+                    className="w-full rounded-md border border-gray-200 bg-white px-3 py-2 text-xs text-gray-700 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-200"
+                  />
+                  {hasQuery && (
+                    <div className="mt-1 flex items-center justify-between text-[11px] text-gray-500">
+                      <span>
+                        Showing matches for: <span className="font-medium">{indexQuery}</span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setIndexQuery("")}
+                        className="text-blue-600 hover:underline"
+                      >
+                        Clear
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Sections */}
+                {filteredIndexSections.length === 0 ? (
+                  <div className="rounded-md border border-gray-200 bg-gray-50 p-3 text-xs text-gray-600">
+                    No matches found.
+                  </div>
+                ) : (
+                  filteredIndexSections.map((sec) => {
+                    const secIdx = sections.findIndex((s) => s.name === sec.name);
+                    const isOpen = openSections[sec.name] ?? (secIdx === currentStep);
+
+                    return (
+                      <div key={sec.name} className="mb-2">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setOpenSections((prev) => ({ ...prev, [sec.name]: !isOpen }))
+                          }
+                          className={`flex w-full items-center justify-between rounded-md px-2 py-2 text-left text-sm ${
+                            secIdx === currentStep
+                              ? "bg-blue-50 text-blue-800"
+                              : "hover:bg-gray-50 text-gray-800"
+                          }`}
+                          title={sec.name}
+                        >
+                          <span className="truncate">
+                            {hasQuery ? highlightText(sec.name, queryTokens) : sec.name}
+                          </span>
+                          <span className="ml-2 text-xs text-gray-400">{isOpen ? "–" : "+"}</span>
+                        </button>
+
+                        {isOpen && (
+                          <div className="mt-1 space-y-1 pl-2">
+                            {sec.fields.map((f) => {
+                              const labelText = String(f.label ?? "");
+                              const lineText = f.line_it ? `Line ${f.line_it}` : "";
+
+                              return (
+                                <button
+                                  key={f.field_key}
+                                  type="button"
+                                  onClick={() => handleIndexClick(secIdx, f.field_key)}
+                                  className="group w-full rounded-md px-2 py-1 text-left text-xs text-gray-600 hover:bg-gray-50"
+                                  title={labelText}
+                                >
+                                  <div className="flex items-start gap-2">
+                                    {f.line_it ? (
+                                      <span className="mt-0.5 inline-flex shrink-0 items-center rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-mono text-gray-600">
+                                        {hasQuery ? highlightText(String(f.line_it), queryTokens) : f.line_it}
+                                      </span>
+                                    ) : (
+                                      <span className="mt-0.5 inline-flex shrink-0 items-center rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-mono text-gray-600">
+                                        •
+                                      </span>
+                                    )}
+
+                                    <span className="line-clamp-2 text-gray-700 group-hover:text-gray-900">
+                                      {hasQuery ? highlightText(labelText, queryTokens) : labelText}
+                                      {lineText ? (
+                                        <span className="ml-1 text-gray-400">
+                                          {" "}
+                                          ({hasQuery ? highlightText(lineText, queryTokens) : lineText})
+                                        </span>
+                                      ) : null}
+                                    </span>
+                                  </div>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* MAIN */}
+      <div className="min-w-0 flex-1 space-y-4">
+        {/* Saved banner */}
+        {showSavedBanner && (
+          <div className="rounded-md border border-green-200 bg-green-50 px-4 py-2 text-sm text-green-800">
+            ✅ Progress saved
+          </div>
+        )}
+
+        {/* Header */}
+        <div className="flex items-start justify-between gap-4">
+          <div className="space-y-1">
+            <div className="text-sm text-gray-500">Form 1041 progress</div>
+            <div className="text-sm text-gray-500">
+              {pctTabs}% complete · Step {stepNumber} of {totalSteps}
             </div>
           </div>
 
@@ -406,116 +595,115 @@ export function Form1041Wizard({
               type="button"
               onClick={() => performSave()}
               disabled={saving || !onSubmit}
-              className="inline-flex items-center gap-1 rounded-full border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 shadow-sm hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+              className="inline-flex items-center gap-1 rounded-full border border-gray-300 bg-white px-4 py-2 text-sm text-gray-700 shadow-sm hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {saving ? "Saving…" : "Save progress"}
             </button>
+
+            <button
+              type="button"
+              onClick={handleDownload}
+              className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-gray-300 bg-white text-xs text-gray-500 hover:bg-gray-50"
+              aria-label="Download 1041 PDF"
+              title="Download 1041 PDF"
+            >
+              ↓
+            </button>
+
             <button
               type="button"
               onClick={handleClose}
-              className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-gray-300 bg-white text-xs text-gray-500 hover:bg-gray-50"
+              className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-gray-300 bg-white text-xs text-gray-500 hover:bg-gray-50"
               aria-label="Back to dashboard"
+              title="Back to dashboard"
             >
               ×
             </button>
           </div>
         </div>
 
-        <div className="h-2 w-full overflow-hidden rounded-full bg-gray-100">
-          <div
-            className="h-2 rounded-full bg-blue-500 transition-all"
-            style={{ width: `${overallProgress}%` }}
-          />
+        {/* Progress bar */}
+        <div className="h-2 w-full overflow-hidden rounded-full bg-gray-200">
+          <div className="h-full bg-blue-500" style={{ width: `${pctTabs}%` }} />
         </div>
-      </div>
 
-      {/* Tabs (file-tab style, no scrollbar, wraps if needed) */}
-      <div className="border-b border-gray-200 pb-1">
-        <div className="flex flex-wrap gap-1 text-xs">
+        {/* Tabs */}
+        <div className="flex flex-wrap gap-2">
           {sections.map((s, idx) => {
-            const isActive = idx === currentStep;
+            const active = idx === currentStep;
             return (
               <button
                 key={s.name}
                 type="button"
                 onClick={() => handleTabClick(idx)}
-                className={[
-                  "rounded-t-md px-3 py-1",
-                  "border",
-                  isActive
-                    ? "border-gray-300 border-b-white bg-white text-gray-900"
-                    : "border-transparent bg-gray-50 text-gray-500 hover:bg-gray-100",
-                ].join(" ")}
+                className={`rounded-md px-3 py-1 text-sm ${
+                  active
+                    ? "border border-blue-500 bg-white text-gray-900"
+                    : "border border-gray-200 bg-white text-gray-500 hover:text-gray-700"
+                }`}
               >
                 {s.name}
               </button>
             );
           })}
         </div>
-      </div>
 
-      {/* Step header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-lg font-semibold text-gray-900">
-            {step.name}
-          </h2>
-          <p className="text-xs text-gray-500">
-            Step {currentStep + 1} of {totalSteps}
-          </p>
-        </div>
-        <div className="text-xs text-gray-400">
-          Fields with <span className="text-gray-400">*</span> are required
-        </div>
-      </div>
-
-      {/* Fields */}
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-        {step.fields.map((field) => (
-          <div
-            key={field.id}
-            className="rounded-md border border-gray-100 bg-white p-3"
-          >
-            <FieldRenderer
-              field={field}
-              value={answers[field.field_key]}
-              onChange={handleChange}
-              filingId={filingId}
-            />
+        {/* Error banner */}
+        {error ? (
+          <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+            {error}
           </div>
-        ))}
-      </div>
+        ) : null}
 
-      {/* Error */}
-      {error && (
-        <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">
-          {error}
+        {/* Section header */}
+        <div className="flex items-start justify-between">
+          <div>
+            <div className="text-2xl font-semibold text-gray-900">{currentSection.name}</div>
+            <div className="text-sm text-gray-500">
+              Step {stepNumber} of {totalSteps}
+            </div>
+          </div>
+          <div className="text-sm text-gray-400">Fields with * are required</div>
         </div>
-      )}
 
-      {/* Navigation buttons */}
-      <div className="flex items-center justify-between pt-2">
-        <button
-          type="button"
-          onClick={goBack}
-          disabled={currentStep === 0}
-          className="rounded-md border border-gray-200 px-4 py-2 text-sm text-gray-700 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          Back
-        </button>
-        <button
-          type="button"
-          onClick={goNext}
-          disabled={saving}
-          className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {currentStep === totalSteps - 1
-            ? saving
-              ? "Saving…"
-              : "Finish"
-            : "Next"}
-        </button>
+        {/* Fields */}
+        <div className="space-y-3">
+          {currentSection.fields.map((f) => (
+            <div key={f.field_key} id={`field-${f.field_key}`} className="scroll-mt-24">
+              <FieldRenderer
+                field={f}
+                audience={audience}
+                filingId={filingId}
+                allAnswers={derivedAnswers}
+                value={derivedAnswers[f.field_key] ?? ""}
+                onChange={(val) => updateAnswer(f.field_key, val)}
+              />
+            </div>
+          ))}
+        </div>
+
+        {/* Footer nav */}
+        <div className="flex items-center justify-between pt-4">
+          <button
+            type="button"
+            onClick={handleBack}
+            disabled={currentStep === 0}
+            className="rounded-md border border-gray-300 bg-white px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Back
+          </button>
+
+          <button
+            type="button"
+            onClick={handleNextOrFinish}
+            className="rounded-md bg-black px-4 py-2 text-sm text-white hover:bg-gray-900 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {isLastStep ? "Print Preview" : "Next"}
+          </button>
+        </div>
       </div>
     </div>
   );
 }
+
+export default Form1041Wizard;

@@ -21,7 +21,7 @@ const pool = new Pool({
 });
 
 // -----------------------------------------------------------------------------
-// Load filing metadata
+// Load filing metadata + client name (matches your schema: clients.first_name/last_name)
 // -----------------------------------------------------------------------------
 
 async function getFiling(filingId: string) {
@@ -29,9 +29,15 @@ async function getFiling(filingId: string) {
   try {
     const res = await client.query(
       `
-      SELECT id, tax_year, filing_type
-      FROM public.filings
-      WHERE id = $1
+      SELECT
+        f.id,
+        f.tax_year,
+        f.filing_type,
+        f.client_id,
+        TRIM(CONCAT_WS(' ', c.first_name, c.last_name)) AS client_name
+      FROM public.filings f
+      LEFT JOIN public.clients c ON c.id = f.client_id
+      WHERE f.id = $1
       LIMIT 1
       `,
       [filingId]
@@ -134,9 +140,7 @@ async function saveAnswers(filingId: string, answers: Record<string, any>) {
 
       entries.forEach(([fieldKey, value], index) => {
         const base = index * 3;
-        placeholders.push(
-          `($${base + 1}, $${base + 2}, $${base + 3})`
-        );
+        placeholders.push(`($${base + 1}, $${base + 2}, $${base + 3})`);
         values.push(filingId, fieldKey, JSON.stringify(value));
       });
 
@@ -162,16 +166,42 @@ async function saveAnswers(filingId: string, answers: Record<string, any>) {
 // -----------------------------------------------------------------------------
 
 type PageProps = {
-  params: Promise<{ filingId: string }>; // 👈 Promise params
+  params: Promise<{ filingId: string }>;
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
 };
 
-export default async function IntakePage({ params }: PageProps) {
-  const { filingId } = await params; // 👈 unwrap the Promise
+export default async function IntakePage({ params, searchParams }: PageProps) {
+  const { filingId } = await params;
 
   const filing = await getFiling(filingId);
   if (!filing) notFound();
 
   const { fields, initialAnswers } = await get1041FieldsAndAnswers(filingId);
+
+  // --- merge ?ptin=... into initialAnswers, without overwriting saved value ---
+  const sp = (await searchParams) ?? {};
+  const ptinRaw = sp["ptin"];
+  const ptin =
+    typeof ptinRaw === "string"
+      ? ptinRaw.trim()
+      : Array.isArray(ptinRaw)
+      ? (ptinRaw[0] ?? "").trim()
+      : "";
+
+  // Only set from URL if nothing saved yet
+  if (ptin && (initialAnswers["ptin"] == null || initialAnswers["ptin"] === "")) {
+    initialAnswers["ptin"] = ptin;
+  }
+
+  // --- NEW: top-right context values ---
+  const clientName =
+    (filing.client_name as string | null | undefined) ||
+    "Client";
+
+  const estateOrTrustName =
+    (initialAnswers["estate_or_trust_name"] ?? "")
+      ?.toString?.()
+      ?.trim?.() ?? "";
 
   const audience: AudienceMode = "lawyer";
 
@@ -182,11 +212,21 @@ export default async function IntakePage({ params }: PageProps) {
 
   return (
     <div className="mx-auto max-w-5xl space-y-6 py-6">
-      <div className="space-y-1">
-        <h1 className="text-2xl font-semibold text-gray-900">1041 Intake</h1>
-        <p className="text-sm text-gray-600">
-          Tax year {filing.tax_year}. Your answers save automatically.
-        </p>
+      {/* Header row: title on left, context on right */}
+      <div className="flex items-start justify-between gap-6">
+        <div className="space-y-1">
+          <h1 className="text-2xl font-semibold text-gray-900">1041 Intake</h1>
+          <p className="text-sm text-gray-600">
+            Tax year {filing.tax_year}. Your answers save automatically.
+          </p>
+        </div>
+
+        <div className="text-right">
+          <div className="text-sm font-semibold text-gray-900">{clientName}</div>
+          <div className="text-sm text-gray-600">
+            {estateOrTrustName ? estateOrTrustName : "Estate/Trust: (not entered yet)"}
+          </div>
+        </div>
       </div>
 
       <Form1041Wizard

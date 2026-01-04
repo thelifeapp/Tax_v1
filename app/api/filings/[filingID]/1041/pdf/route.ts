@@ -1,19 +1,21 @@
-// app/api/filings/[filingID]/1041/pdf/route.ts
 export const runtime = "nodejs";
 
 import { NextRequest, NextResponse } from "next/server";
 import path from "path";
 import fs from "fs/promises";
-import { createClient } from "@supabase/supabase-js";
+import { Pool } from "pg";
 import { PDFDocument } from "pdf-lib";
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const DATABASE_URL = process.env.DATABASE_URL;
 
-const supabaseAdmin =
-  supabaseUrl && serviceKey
-    ? createClient(supabaseUrl, serviceKey, { auth: { persistSession: false } })
-    : null;
+if (!DATABASE_URL) {
+  throw new Error("DATABASE_URL is missing (check .env.local)");
+}
+
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+});
 
 function jsonToPrimitive(v: any): any {
   if (v === null || v === undefined) return null;
@@ -22,7 +24,7 @@ function jsonToPrimitive(v: any): any {
   if (typeof v === "object") {
     if ("value" in v) return jsonToPrimitive((v as any).value);
     if ("text" in v) return jsonToPrimitive((v as any).text);
-    return v; // keep object (we'll stringify for text fields)
+    return v;
   }
   return v;
 }
@@ -41,30 +43,18 @@ function isTruthyYes(v: any): boolean {
   return s === "yes" || s === "true" || s === "1" || s === "on" || s === "checked";
 }
 
-/**
- * Option 2: normalization safety net
- * - Handles curly apostrophes (Decedent’s vs Decedent's)
- * - Handles em/en dashes (Ch. 7 vs Ch—7)
- * - Handles punctuation / spacing differences
- * - Allows mapping table to use either UI labels or tokens
- */
 function normalizeToken(s: any): string {
   return String(s ?? "")
     .trim()
     .toLowerCase()
-    .replace(/[’']/g, "") // remove apostrophes (curly + straight)
-    .replace(/[—–-]/g, "_") // dashes/em-dashes -> underscore
+    .replace(/[’']/g, "")
+    .replace(/[—–-]/g, "_")
     .replace(/&/g, "and")
-    .replace(/\./g, "") // remove periods (e.g. "Ch. 7" -> "ch 7")
-    .replace(/[^a-z0-9]+/g, "_") // spaces/punct -> underscore
-    .replace(/^_+|_+$/g, ""); // trim underscores
+    .replace(/\./g, "")
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
 }
 
-/**
- * Flexible match:
- * - exact match wins
- * - otherwise normalized match
- */
 function matchesOption(answerItem: any, option: string): boolean {
   const a = String(answerItem ?? "");
   const o = String(option ?? "");
@@ -81,31 +71,33 @@ type PdfMapRow = {
 
 export async function GET(
   req: NextRequest,
-  ctx: { params: Promise<{ filingID: string }> } // Next.js 16: params is a Promise
+  ctx: { params: Promise<{ filingID: string }> }
 ) {
-  try {
-    if (!supabaseAdmin) {
-      return NextResponse.json(
-        { error: "Server misconfigured: Supabase admin client not initialized." },
-        { status: 500 }
-      );
-    }
+  const client = await pool.connect();
 
+  try {
     const { filingID } = await ctx.params;
 
     const { searchParams } = new URL(req.url);
     const dump = searchParams.get("dump") === "1";
+    const inline = searchParams.get("inline") === "1";
 
-    // 1) Validate filing exists + is 1041
-    const { data: filing, error: filingErr } = await supabaseAdmin
-      .from("filings")
-      .select("id, client_id, filing_type, tax_year")
-      .eq("id", filingID)
-      .single();
+    // 1) Load filing (validate exists + is 1041)
+    const filingRes = await client.query(
+      `
+      SELECT id, client_id, filing_type, tax_year
+      FROM public.filings
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [filingID]
+    );
 
-    if (filingErr || !filing) {
+    const filing = filingRes.rows[0] ?? null;
+
+    if (!filing) {
       return NextResponse.json(
-        { error: `Filing not found: ${filingID}`, details: filingErr?.message },
+        { error: `Filing not found: ${filingID}` },
         { status: 404 }
       );
     }
@@ -117,27 +109,34 @@ export async function GET(
       );
     }
 
-    // 2) Pull answers (UI source of truth)
-    const { data: answers, error: ansErr } = await supabaseAdmin
-      .from("form_answers")
-      .select("field_key, value")
-      .eq("filing_id", filingID);
-
-    if (ansErr) return NextResponse.json({ error: ansErr.message }, { status: 500 });
+    // 2) Pull answers
+    const answersRes = await client.query(
+      `
+      SELECT field_key, value
+      FROM public.form_answers
+      WHERE filing_id = $1
+      `,
+      [filingID]
+    );
 
     const answerMap = new Map<string, any>();
-    (answers ?? []).forEach((a: any) => answerMap.set(a.field_key, a.value));
+    for (const row of answersRes.rows) {
+      answerMap.set(row.field_key, row.value);
+    }
 
-    // 3) Pull checkbox mappings (translation layer)
-    const { data: pdfMaps, error: mapErr } = await supabaseAdmin
-      .from("pdf_field_mappings_1041")
-      .select("field_key, pdf_field_name, format, constant_value")
-      .eq("tax_year", 2024);
+    // 3) Pull checkbox mappings
+    const mapsRes = await client.query(
+      `
+      SELECT field_key, pdf_field_name, format, constant_value
+      FROM public.pdf_field_mappings_1041
+      WHERE tax_year = 2024
+      `,
+      []
+    );
 
-    if (mapErr) return NextResponse.json({ error: mapErr.message }, { status: 500 });
-
-    const checkboxMaps = (pdfMaps ?? []).filter(
-      (r: PdfMapRow) => (r.format ?? "").toLowerCase() === "checkbox"
+    const pdfMaps: PdfMapRow[] = mapsRes.rows ?? [];
+    const checkboxMaps = pdfMaps.filter(
+      (r) => String(r.format ?? "").toLowerCase() === "checkbox"
     );
 
     // 4) Load PDF template
@@ -147,7 +146,7 @@ export async function GET(
     const pdfDoc = await PDFDocument.load(pdfBytes);
     const form = pdfDoc.getForm();
 
-    // Dump mode: confirm PDF field names
+    // Debug mode: list PDF fields
     if (dump) {
       const names = form.getFields().map((f) => f.getName());
       return NextResponse.json({
@@ -156,13 +155,11 @@ export async function GET(
         taxYear: filing.tax_year,
         pdfFieldCount: names.length,
         pdfFieldNamesSample: names.slice(0, 250),
-        hasEstateOrTrustName: names.includes("estate_or_trust_name"),
-        hasEin: names.includes("employer_identification_number_ein"),
         checkboxMappingRows: checkboxMaps.length,
       });
     }
 
-    // 5) Fill text fields where field_key == pdf field name (your page-1 renames)
+    // 5) Fill text fields (where field_key == pdf field name)
     let filledText = 0;
     const missingTextInPdf: string[] = [];
 
@@ -178,7 +175,7 @@ export async function GET(
       }
     }
 
-    // 6) Fill checkboxes via mapping table (now with normalization fallback)
+    // 6) Fill checkboxes via mapping table
     let filledCheckbox = 0;
     const missingCheckboxInPdf: string[] = [];
 
@@ -189,23 +186,13 @@ export async function GET(
       let shouldCheck = false;
 
       if (Array.isArray(logicalAnswer)) {
-        // Multi-select: check if ANY selected item matches this mapping option
         shouldCheck = logicalAnswer.some((item) => matchesOption(item, option));
       } else if (typeof logicalAnswer === "boolean") {
-        // boolean support
-        if (!option) {
-          shouldCheck = logicalAnswer === true;
-        } else {
-          shouldCheck = matchesOption(String(logicalAnswer), option);
-        }
+        if (!option) shouldCheck = logicalAnswer === true;
+        else shouldCheck = matchesOption(String(logicalAnswer), option);
       } else {
-        // string/number/etc.
-        if (!option) {
-          // yes/no checkbox
-          shouldCheck = isTruthyYes(logicalAnswer);
-        } else {
-          shouldCheck = matchesOption(logicalAnswer, option);
-        }
+        if (!option) shouldCheck = isTruthyYes(logicalAnswer);
+        else shouldCheck = matchesOption(logicalAnswer, option);
       }
 
       try {
@@ -218,13 +205,17 @@ export async function GET(
       }
     }
 
-    const outBytes = await pdfDoc.save(); // keep fillable
+    const outBytes = await pdfDoc.save();
+
+    const disposition = inline
+      ? `inline; filename="1041_${filing.tax_year}_${filingID}.pdf"`
+      : `attachment; filename="1041_${filing.tax_year}_${filingID}.pdf"`;
 
     return new NextResponse(outBytes, {
       status: 200,
       headers: {
         "Content-Type": "application/pdf",
-        "Content-Disposition": `attachment; filename="1041_${filing.tax_year}_${filingID}.pdf"`,
+        "Content-Disposition": disposition,
         "X-Filled-Text": String(filledText),
         "X-Filled-Checkbox": String(filledCheckbox),
         "X-Missing-Text-In-PDF-Count": String(missingTextInPdf.length),
@@ -237,5 +228,7 @@ export async function GET(
       { error: "Unhandled error in 1041 PDF route", details: String(e?.message ?? e) },
       { status: 500 }
     );
+  } finally {
+    client.release();
   }
 }

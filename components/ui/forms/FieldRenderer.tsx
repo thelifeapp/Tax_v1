@@ -1,18 +1,17 @@
 "use client";
 
 import React, { useEffect, useRef, useState } from "react";
-import type { FormField1041 } from "@/types/forms";
+import type { FormField1041, AudienceMode } from "@/types/forms";
 
 type FieldRendererProps = {
   field: FormField1041;
-  value: any;
-  onChange: (fieldKey: string, val: any) => void;
+  audience: AudienceMode;
   filingId: string;
+  allAnswers: Record<string, any>;
+  value: any;
+  onChange: (val: any) => void;
 };
 
-/**
- * Normalize input_type + type into a small set of UI control kinds.
- */
 type InputKind =
   | "text"
   | "number"
@@ -27,29 +26,12 @@ function resolveInputKind(field: FormField1041): InputKind {
   const rawInput = (field.input_type || "").toLowerCase().trim();
   const rawType = (field.type || "").toLowerCase().trim();
 
-  if (rawInput.includes("checkbox") && rawInput.includes("multi")) {
-    return "multi_select";
-  }
-
-  if (rawInput.includes("checkbox")) {
-    return "checkbox_single";
-  }
-
-  if (rawInput === "yes;no") {
-    return "select";
-  }
-
-  if (rawInput.includes("date")) {
-    return "date";
-  }
-
-  if (rawInput.includes("currency")) {
-    return "currency";
-  }
-
-  if (rawInput.includes("number")) {
-    return "number";
-  }
+  if (rawInput.includes("checkbox") && rawInput.includes("multi")) return "multi_select";
+  if (rawInput.includes("checkbox")) return "checkbox_single";
+  if (rawInput === "yes;no") return "select";
+  if (rawInput.includes("date")) return "date";
+  if (rawInput.includes("currency")) return "currency";
+  if (rawInput.includes("number")) return "number";
 
   if (
     rawInput.includes("attachment") ||
@@ -84,10 +66,7 @@ function getPlaceholder(field: FormField1041): string | undefined {
   const key = (field.field_key || "").toLowerCase();
   const label = (field.label || "").toLowerCase();
 
-  if (key.includes("ein") || label.includes("ein")) {
-    return "XX-XXXXXXX";
-  }
-
+  if (key.includes("ein") || label.includes("ein")) return "XX-XXXXXXX";
   return undefined;
 }
 
@@ -114,9 +93,9 @@ function getFileDisplayName(url: string): string {
 
 export function FieldRenderer({
   field,
+  filingId,
   value,
   onChange,
-  filingId,
 }: FieldRendererProps) {
   const {
     field_key,
@@ -124,7 +103,6 @@ export function FieldRenderer({
     help_text,
     required,
     is_calculated,
-    calculation, // kept in case we want it later
     source_notes,
     options,
     line_it,
@@ -135,25 +113,33 @@ export function FieldRenderer({
   const placeholder = getPlaceholder(field);
   const addressField = isAddressField(field);
 
-  // Local display state for currency so we can format on blur
+  // ✅ defensive: never show field_key as a “default value”
+  const safeValue =
+    typeof value === "string" && value === field_key ? "" : value;
+
+  // currency display state
   const [currencyDisplay, setCurrencyDisplay] = useState(
-    kind === "currency" ? formatCurrency(value) : ""
+    kind === "currency" ? formatCurrency(safeValue) : ""
   );
 
-  // Address autocomplete
   const addressInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Attachment input
+  // attachment handling
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [attachmentBusy, setAttachmentBusy] = useState(false);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
 
-  // Info panel visibility for the "i" button
+  // info panel
   const [showInfo, setShowInfo] = useState(false);
-
-  // For now, only show info based on source_notes (user-facing description)
   const hasInfo = !!source_notes;
   const infoTitle = source_notes || "";
+
+  useEffect(() => {
+    if (kind === "currency") {
+      setCurrencyDisplay(formatCurrency(safeValue));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [safeValue, kind]);
 
   useEffect(() => {
     if (!addressField || disabled) return;
@@ -173,9 +159,7 @@ export function FieldRenderer({
       const place = autocomplete.getPlace();
       const formatted =
         place?.formatted_address || addressInputRef.current?.value || "";
-      if (formatted) {
-        onChange(field_key, formatted);
-      }
+      if (formatted) onChange(formatted);
     });
 
     return () => {
@@ -183,65 +167,52 @@ export function FieldRenderer({
         google.maps.event.clearInstanceListeners(autocomplete);
       }
     };
-  }, [addressField, disabled, field_key, onChange]);
-
-  useEffect(() => {
-    if (kind === "currency") {
-      setCurrencyDisplay(formatCurrency(value));
-    }
-  }, [value, kind]);
+  }, [addressField, disabled, onChange]);
 
   const handleChange = (
-    e: React.ChangeEvent<
-      HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement
-    >
+    e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>
   ) => {
     const target = e.target as HTMLInputElement;
 
     if (kind === "checkbox_single") {
-      onChange(field_key, target.checked);
+      onChange(target.checked);
       return;
     }
 
     if (kind === "currency") {
-      const raw = target.value;
-      setCurrencyDisplay(raw);
+      setCurrencyDisplay(target.value);
       return;
     }
 
     if (kind === "number") {
       const raw = target.value;
       const num = raw === "" ? null : Number(raw);
-      onChange(field_key, Number.isNaN(num) ? null : num);
+      onChange(Number.isNaN(num) ? null : num);
       return;
     }
 
-    // attachment handled separately
-    onChange(field_key, target.value);
+    onChange(target.value);
   };
 
   const handleCurrencyBlur = () => {
     if (kind !== "currency") return;
-    const cleaned = currencyDisplay.replace(/[^0-9.-]/g, "");
+    const cleaned = String(currencyDisplay ?? "").replace(/[^0-9.-]/g, "");
     const num = cleaned === "" ? null : Number(cleaned);
+
     if (num === null || Number.isNaN(num)) {
-      onChange(field_key, null);
+      onChange(null);
       setCurrencyDisplay("");
       return;
     }
-    onChange(field_key, num);
+
+    onChange(num);
     setCurrencyDisplay(formatCurrency(num));
   };
 
-  // ---------------------------
-  // Attachment helpers
-  // ---------------------------
+  // attachments
+  const currentAttachmentUrls: string[] = Array.isArray(safeValue) ? safeValue : [];
 
-  const currentAttachmentUrls: string[] = Array.isArray(value) ? value : [];
-
-  const handleFilesSelected = async (
-    e: React.ChangeEvent<HTMLInputElement>
-  ) => {
+  const handleFilesSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
     if (files.length === 0) return;
 
@@ -253,9 +224,7 @@ export function FieldRenderer({
       formData.append("filingId", filingId);
       formData.append("fieldKey", field_key);
 
-      for (const f of files) {
-        formData.append("files", f);
-      }
+      for (const f of files) formData.append("files", f);
 
       const res = await fetch("/api/attachments/upload", {
         method: "POST",
@@ -268,13 +237,9 @@ export function FieldRenderer({
       }
 
       const newUrls: string[] = json.urls || [];
-      const merged = [...currentAttachmentUrls, ...newUrls];
-      onChange(field_key, merged);
+      onChange([...currentAttachmentUrls, ...newUrls]);
 
-      // Reset input so same file can be selected again later if needed
-      if (fileInputRef.current) {
-        fileInputRef.current.value = "";
-      }
+      if (fileInputRef.current) fileInputRef.current.value = "";
     } catch (err: any) {
       setAttachmentError(err?.message || "Upload failed");
     } finally {
@@ -298,8 +263,7 @@ export function FieldRenderer({
         throw new Error(json?.error || "Delete failed");
       }
 
-      const remaining = currentAttachmentUrls.filter((u) => u !== url);
-      onChange(field_key, remaining);
+      onChange(currentAttachmentUrls.filter((u) => u !== url));
     } catch (err: any) {
       setAttachmentError(err?.message || "Delete failed");
     } finally {
@@ -307,24 +271,12 @@ export function FieldRenderer({
     }
   };
 
-  // ---------------------------
-  // Render input control
-  // ---------------------------
-
   const renderInput = () => {
-    // Calculated fields: read-only
     if (disabled) {
-      const inputType =
-        kind === "currency"
-          ? "text"
-          : kind === "number"
-          ? "number"
-          : kind === "date"
-          ? "date"
-          : "text";
-
       const displayValue =
-        kind === "currency" ? formatCurrency(value) : value ?? "";
+        kind === "currency" ? formatCurrency(safeValue) : (safeValue ?? "");
+      const inputType =
+        kind === "date" ? "date" : kind === "number" ? "number" : "text";
 
       return (
         <input
@@ -340,7 +292,7 @@ export function FieldRenderer({
       return (
         <input
           type="date"
-          value={value ?? ""}
+          value={safeValue ?? ""}
           onChange={handleChange}
           className="w-full rounded-md border border-gray-200 px-3 py-2 text-sm"
         />
@@ -364,7 +316,7 @@ export function FieldRenderer({
       return (
         <input
           type="number"
-          value={value ?? ""}
+          value={safeValue ?? ""}
           onChange={handleChange}
           placeholder={placeholder}
           className="w-full rounded-md border border-gray-200 px-3 py-2 text-sm"
@@ -378,15 +330,13 @@ export function FieldRenderer({
           <div className="flex items-center gap-2">
             <input
               type="checkbox"
-              checked={!!value}
+              checked={!!safeValue}
               onChange={handleChange}
               className="h-4 w-4 rounded border-gray-300"
             />
             <span>Check if this applies</span>
           </div>
-          <p className="text-xs text-gray-500">
-            Leave blank if not applicable.
-          </p>
+          <p className="text-xs text-gray-500">Leave blank if not applicable.</p>
         </div>
       );
     }
@@ -394,14 +344,14 @@ export function FieldRenderer({
     if (kind === "select" && options && options.length > 0) {
       return (
         <select
-          value={value ?? ""}
+          value={safeValue ?? ""}
           onChange={handleChange}
           className="w-full rounded-md border border-gray-200 px-3 py-2 text-sm bg-white"
         >
           <option value="">Select…</option>
           {options.map((opt) => (
-            <option key={opt} value={opt}>
-              {opt}
+            <option key={String(opt)} value={String(opt)}>
+              {String(opt)}
             </option>
           ))}
         </select>
@@ -409,35 +359,36 @@ export function FieldRenderer({
     }
 
     if (kind === "multi_select" && options && options.length > 0) {
-      const current: string[] = Array.isArray(value) ? value : [];
+      const current: string[] = Array.isArray(safeValue) ? safeValue : [];
 
       const toggle = (opt: string) => {
         if (current.includes(opt)) {
-          onChange(
-            field_key,
-            current.filter((v) => v !== opt)
-          );
+          onChange(current.filter((v) => v !== opt));
         } else {
-          onChange(field_key, [...current, opt]);
+          onChange([...current, opt]);
         }
       };
 
       return (
         <div className="flex flex-wrap gap-2">
-          {options.map((opt) => (
-            <button
-              key={opt}
-              type="button"
-              onClick={() => toggle(opt)}
-              className={`rounded-full border px-3 py-1 text-xs ${
-                current.includes(opt)
-                  ? "border-blue-500 bg-blue-50 text-blue-700"
-                  : "border-gray-200 bg-white text-gray-700"
-              }`}
-            >
-              {opt}
-            </button>
-          ))}
+          {options.map((optRaw) => {
+            const opt = String(optRaw);
+            const active = current.includes(opt);
+            return (
+              <button
+                key={opt}
+                type="button"
+                onClick={() => toggle(opt)}
+                className={`rounded-full border px-3 py-1 text-xs ${
+                  active
+                    ? "border-blue-500 bg-blue-50 text-blue-700"
+                    : "border-gray-200 bg-white text-gray-700"
+                }`}
+              >
+                {opt}
+              </button>
+            );
+          })}
         </div>
       );
     }
@@ -504,12 +455,11 @@ export function FieldRenderer({
       );
     }
 
-    // Default text / address input
     return (
       <input
         ref={addressField ? addressInputRef : undefined}
         type="text"
-        value={value ?? ""}
+        value={safeValue ?? ""}
         onChange={handleChange}
         placeholder={placeholder}
         className="w-full rounded-md border border-gray-200 px-3 py-2 text-sm"
@@ -518,10 +468,10 @@ export function FieldRenderer({
   };
 
   const addressMapsLink =
-    addressField && typeof value === "string" && value.trim().length > 0 ? (
+    addressField && typeof safeValue === "string" && safeValue.trim().length > 0 ? (
       <a
         href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
-          value
+          safeValue
         )}`}
         target="_blank"
         rel="noopener noreferrer"
@@ -542,9 +492,7 @@ export function FieldRenderer({
           )}
           <span>
             {label}
-            {required && (
-              <span className="ml-1 text-xs text-gray-400">*</span>
-            )}
+            {required && <span className="ml-1 text-xs text-gray-400">*</span>}
           </span>
         </span>
 
@@ -553,7 +501,7 @@ export function FieldRenderer({
             type="button"
             className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-gray-300 bg-gray-50 text-[10px] text-gray-500"
             title={infoTitle}
-            aria-label="View calculation details"
+            aria-label="View details"
             onClick={() => setShowInfo((v) => !v)}
           >
             i
@@ -576,3 +524,5 @@ export function FieldRenderer({
     </div>
   );
 }
+
+export default FieldRenderer;

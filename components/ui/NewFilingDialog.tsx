@@ -22,52 +22,35 @@ interface NewFilingDialogProps {
 
 type IntakeMode = "client" | "lawyer";
 
-const FORM_CODES = ["1041", "706", "709"] as const;
-type FormCode = (typeof FORM_CODES)[number];
-
 export function NewFilingDialog(props: NewFilingDialogProps) {
   const { clientId, clientEmail, onCreated } = props;
-  // NOTE: we accept clientName via props but don't currently use it.
-  // Keeping it off the destructuring avoids an unused variable warning.
 
   const router = useRouter();
 
   const [open, setOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // original behavior: multiple forms via checkboxes
-  const [selectedForms, setSelectedForms] = useState<FormCode[]>(["1041"]);
-  const [taxYear, setTaxYear] = useState<number>(new Date().getFullYear());
-  const [status, setStatus] = useState<string>("draft");
-  const [intakeMode, setIntakeMode] = useState<IntakeMode>("lawyer"); // default CPA/Lawyer
+  // LOCKED for now (MVP)
+  const FIXED_FORM = "1041";
+  const FIXED_TAX_YEAR = 2024;
 
-  function toggleForm(code: FormCode) {
-    setSelectedForms((prev) =>
-      prev.includes(code) ? prev.filter((c) => c !== code) : [...prev, code]
-    );
-  }
+  const [status, setStatus] = useState<string>("in_progress");
+  const [intakeMode, setIntakeMode] = useState<IntakeMode>("lawyer"); // default CPA/Lawyer
+  const [ptin, setPtin] = useState<string>("");
 
   async function handleCreate() {
     try {
       setIsSubmitting(true);
 
-      if (selectedForms.length === 0) {
-        alert("Please select at least one form.");
-        setIsSubmitting(false);
-        return;
-      }
-
-      // 1. Call your existing /api/filings endpoint with the
-      //    same shape it had before we added intakeMode.
+      // Create the filing (locked to 1041 + 2024)
       const res = await fetch("/api/filings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           clientId,
-          taxYear,
+          taxYear: FIXED_TAX_YEAR,
           status,
-          forms: selectedForms, // <= original API contract
-          // NOTE: we intentionally DO NOT send intakeMode here
+          forms: [FIXED_FORM],
         }),
       });
 
@@ -78,11 +61,8 @@ export function NewFilingDialog(props: NewFilingDialogProps) {
       }
 
       const data = await res.json();
-
-      // Some implementations return one filing, some an array – handle both.
       const createdFilings = Array.isArray(data) ? data : [data];
 
-      // Find the 1041 filing (if any)
       const filing1041 =
         createdFilings.find(
           (f: any) =>
@@ -98,14 +78,17 @@ export function NewFilingDialog(props: NewFilingDialogProps) {
           f.form_code === "1041"
       );
 
-      // 2. Lawyer mode + 1041 → go straight into the intake flow
+      const ptinTrim = ptin.trim();
+      const qs = ptinTrim ? `?ptin=${encodeURIComponent(ptinTrim)}` : "";
+
+      // Lawyer mode + 1041 → go straight into intake
       if (intakeMode === "lawyer" && has1041 && filing1041?.id) {
         setOpen(false);
-        router.push(`/filings/${filing1041.id}/intake`);
+        router.push(`/filings/${filing1041.id}/intake${qs}`);
         return;
       }
 
-      // 3. Client mode + 1041 → create invite + copy link
+      // Client mode + 1041 → create invite + copy link (append PTIN if provided)
       if (intakeMode === "client" && has1041 && filing1041?.id) {
         try {
           const inviteRes = await fetch("/api/intake/invite", {
@@ -125,7 +108,13 @@ export function NewFilingDialog(props: NewFilingDialogProps) {
           const { link } = await inviteRes.json();
 
           if (link) {
-            await navigator.clipboard.writeText(link);
+            const linkWithPtin = ptinTrim
+              ? `${link}${link.includes("?") ? "&" : "?"}ptin=${encodeURIComponent(
+                  ptinTrim
+                )}`
+              : link;
+
+            await navigator.clipboard.writeText(linkWithPtin);
             alert("Client intake link copied to your clipboard.");
           } else {
             alert("Client invite created, but no link was returned.");
@@ -138,12 +127,10 @@ export function NewFilingDialog(props: NewFilingDialogProps) {
         }
       }
 
-      // 4. Close dialog, refresh dashboard list, and notify parent
+      // Close dialog, refresh dashboard list, and notify parent
       setOpen(false);
       router.refresh();
-      if (onCreated) {
-        onCreated();
-      }
+      onCreated?.();
     } catch (error) {
       console.error(error);
       alert("Error creating filing. Please try again.");
@@ -165,44 +152,34 @@ export function NewFilingDialog(props: NewFilingDialogProps) {
           </DialogHeader>
 
           <div className="space-y-4 mt-2">
-            {/* Form(s) checkboxes */}
+            {/* Locked Form */}
             <div className="space-y-1">
-              <label className="text-sm font-medium">Form(s)</label>
-              <div className="flex gap-4 text-sm mt-1">
-                {FORM_CODES.map((code) => (
-                  <label key={code} className="flex items-center gap-1">
-                    <input
-                      type="checkbox"
-                      checked={selectedForms.includes(code)}
-                      onChange={() => toggleForm(code)}
-                    />
-                    <span>{code}</span>
-                  </label>
-                ))}
+              <label className="text-sm font-medium">Form</label>
+              <div className="flex items-center gap-2 text-sm">
+                <input type="checkbox" checked readOnly />
+                <span>{FIXED_FORM}</span>
+                <span className="text-xs text-gray-500">(706 and 709 coming soon)</span>
               </div>
             </div>
 
-            {/* Tax year */}
+            {/* Locked Tax year */}
             <div className="space-y-1">
               <label className="text-sm font-medium">Tax year</label>
-              <Input
-                type="number"
-                value={taxYear}
-                onChange={(e) => setTaxYear(Number(e.target.value))}
-              />
+              <Input type="number" value={FIXED_TAX_YEAR} disabled />
+              <div className="text-xs text-gray-500">(only supported year)</div>
             </div>
 
-            {/* Status */}
+            {/* PTIN */}
             <div className="space-y-1">
-              <label className="text-sm font-medium">Initial status</label>
-              <select
-                className="w-full border rounded-md px-2 py-1 text-sm bg-white"
-                value={status}
-                onChange={(e) => setStatus(e.target.value)}
-              >
-                <option value="draft">Draft</option>
-                <option value="in_progress">In progress</option>
-              </select>
+              <label className="text-sm font-medium">Preparer PTIN</label>
+              <Input
+                value={ptin}
+                onChange={(e) => setPtin(e.target.value)}
+                placeholder="Enter PTIN (optional)"
+              />
+              <div className="text-xs text-gray-500">
+                We’ll auto-fill this into the Preparer section.
+              </div>
             </div>
 
             {/* Intake mode */}
