@@ -1,3 +1,4 @@
+// app/api/filings/[filingID]/1041/pdf/route.ts
 export const runtime = "nodejs";
 
 import { NextRequest, NextResponse } from "next/server";
@@ -19,7 +20,8 @@ const pool = new Pool({
 
 function jsonToPrimitive(v: any): any {
   if (v === null || v === undefined) return null;
-  if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return v;
+  if (typeof v === "string" || typeof v === "number" || typeof v === "boolean")
+    return v;
   if (Array.isArray(v)) return v.map(jsonToPrimitive);
   if (typeof v === "object") {
     if ("value" in v) return jsonToPrimitive((v as any).value);
@@ -40,7 +42,9 @@ function jsonToString(v: any): string {
 
 function isTruthyYes(v: any): boolean {
   const s = String(v ?? "").trim().toLowerCase();
-  return s === "yes" || s === "true" || s === "1" || s === "on" || s === "checked";
+  return (
+    s === "yes" || s === "true" || s === "1" || s === "on" || s === "checked"
+  );
 }
 
 function normalizeToken(s: any): string {
@@ -104,7 +108,9 @@ export async function GET(
 
     if (String(filing.filing_type) !== "1041") {
       return NextResponse.json(
-        { error: `This endpoint only supports 1041. Got: ${filing.filing_type}` },
+        {
+          error: `This endpoint only supports 1041. Got: ${filing.filing_type}`,
+        },
         { status: 400 }
       );
     }
@@ -140,7 +146,12 @@ export async function GET(
     );
 
     // 4) Load PDF template
-    const pdfPath = path.join(process.cwd(), "public", "forms", "1041_2024_fillable.pdf");
+    const pdfPath = path.join(
+      process.cwd(),
+      "public",
+      "forms",
+      "1041_2024_fillable.pdf"
+    );
     const pdfBytes = await fs.readFile(pdfPath);
 
     const pdfDoc = await PDFDocument.load(pdfBytes);
@@ -170,7 +181,9 @@ export async function GET(
         form.getTextField(fieldKey).setText(valueStr);
         filledText++;
       } catch {
-        const coveredByCheckboxMap = checkboxMaps.some((m) => m.field_key === fieldKey);
+        const coveredByCheckboxMap = checkboxMaps.some(
+          (m) => m.field_key === fieldKey
+        );
         if (!coveredByCheckboxMap) missingTextInPdf.push(fieldKey);
       }
     }
@@ -211,21 +224,36 @@ export async function GET(
       ? `inline; filename="1041_${filing.tax_year}_${filingID}.pdf"`
       : `attachment; filename="1041_${filing.tax_year}_${filingID}.pdf"`;
 
-    return new NextResponse(outBytes, {
+    // ✅ FIX: NextResponse expects BodyInit; Uint8Array breaks TS in Next 16 build.
+    // Buffer.from(Uint8Array) is valid BodyInit in node runtime.
+    return new NextResponse(Buffer.from(outBytes), {
       status: 200,
       headers: {
         "Content-Type": "application/pdf",
         "Content-Disposition": disposition,
+
+        // ✅ helps iframe reliability + avoids “stuck old pdf”
+        "Cache-Control": "no-store, max-age=0",
+        Pragma: "no-cache",
+        "X-Content-Type-Options": "nosniff",
+
         "X-Filled-Text": String(filledText),
         "X-Filled-Checkbox": String(filledCheckbox),
         "X-Missing-Text-In-PDF-Count": String(missingTextInPdf.length),
-        "X-Missing-Checkbox-In-PDF-Count": String(missingCheckboxInPdf.length),
-        "X-Missing-Checkbox-In-PDF-Sample": missingCheckboxInPdf.slice(0, 25).join(","),
+        "X-Missing-Checkbox-In-PDF-Count": String(
+          missingCheckboxInPdf.length
+        ),
+        "X-Missing-Checkbox-In-PDF-Sample": missingCheckboxInPdf
+          .slice(0, 25)
+          .join(","),
       },
     });
   } catch (e: any) {
     return NextResponse.json(
-      { error: "Unhandled error in 1041 PDF route", details: String(e?.message ?? e) },
+      {
+        error: "Unhandled error in 1041 PDF route",
+        details: String(e?.message ?? e),
+      },
       { status: 500 }
     );
   } finally {
